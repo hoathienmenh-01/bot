@@ -473,3 +473,27 @@ Khi nhập kho, nên để **Kiểu nhận diện = Theo cấu hình sản phẩ
 - Key/license/link mỗi dòng → giữ nguyên từng dòng.
 
 Dữ liệu giao cho khách luôn lấy từ `stock_items.content`; nếu sản phẩm bật giao có nhãn, file giao hàng sẽ hiển thị thành các dòng có nhãn như Email, Mật khẩu, 2FA, Cookie, Token.
+
+## Product images, icons and premium catalog UI
+
+From v2.4.0, each product can have:
+
+- A normal icon/emoji for compact product list buttons.
+- A Telegram custom emoji ID for Premium-style detail captions.
+- A product image uploaded from Web Admin.
+- A short description and long description for richer product cards.
+
+Use:
+
+```text
+Web Admin → Products → Add/Edit product
+```
+
+Upload images as JPG, PNG or WebP. The limit is 5MB per image. Images are stored in:
+
+```text
+media/products/
+```
+
+Backups include `media/products/`, so transferring from phone to computer preserves product images. When the bot successfully sends a product photo, it stores Telegram `file_id` in the database so future sends can use Telegram cache instead of uploading again.
+

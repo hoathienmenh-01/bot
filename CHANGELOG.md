@@ -88,3 +88,17 @@
 - Delivery files can render labeled fields per product, e.g. Email / Password / 2FA.
 - Added SQLite migrations for existing databases to add product stock-format columns safely.
 - Added tests for product-specific stock formats and slash-delimited account imports.
+
+## v2.4.0 - Product media cards / premium catalog UI
+
+- Added product image upload in Web Admin product create/edit forms.
+- Added product icon and custom Telegram emoji ID fields per product.
+- Added product short description and long description fields for richer customer-facing cards.
+- Product list buttons now show icon, name, price and stock count in a compact shop-style format.
+- Product detail can edit the same single-panel message into a photo card with caption and buy buttons.
+- Bot stores Telegram `file_id` after a product image is successfully sent so future sends can reuse Telegram cache.
+- Added Web Admin product preview page.
+- Added strict image validation: JPG/PNG/WebP only, maximum 5MB, magic-byte checked.
+- Backup ZIP now includes `media/products/` and restore extracts product images.
+- Added tests for product media upload, backup media inclusion, custom emoji rendering and image/no-image product views.
+- Full test suite: 61 tests passing, compileall OK, seed demo OK, audit OK.

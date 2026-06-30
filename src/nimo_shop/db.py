@@ -59,6 +59,12 @@ CREATE TABLE IF NOT EXISTS products (
     stock_format_labels TEXT NOT NULL DEFAULT '',
     stock_format_example TEXT NOT NULL DEFAULT '',
     delivery_format TEXT NOT NULL DEFAULT 'auto',
+    product_icon TEXT NOT NULL DEFAULT '',
+    product_custom_emoji_id TEXT NOT NULL DEFAULT '',
+    product_image_path TEXT NOT NULL DEFAULT '',
+    product_image_file_id TEXT NOT NULL DEFAULT '',
+    product_short_description TEXT NOT NULL DEFAULT '',
+    product_long_description TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE SET NULL
 );
@@ -234,6 +240,12 @@ class Database:
             "stock_format_labels": "ALTER TABLE products ADD COLUMN stock_format_labels TEXT NOT NULL DEFAULT ''",
             "stock_format_example": "ALTER TABLE products ADD COLUMN stock_format_example TEXT NOT NULL DEFAULT ''",
             "delivery_format": "ALTER TABLE products ADD COLUMN delivery_format TEXT NOT NULL DEFAULT 'auto'",
+            "product_icon": "ALTER TABLE products ADD COLUMN product_icon TEXT NOT NULL DEFAULT ''",
+            "product_custom_emoji_id": "ALTER TABLE products ADD COLUMN product_custom_emoji_id TEXT NOT NULL DEFAULT ''",
+            "product_image_path": "ALTER TABLE products ADD COLUMN product_image_path TEXT NOT NULL DEFAULT ''",
+            "product_image_file_id": "ALTER TABLE products ADD COLUMN product_image_file_id TEXT NOT NULL DEFAULT ''",
+            "product_short_description": "ALTER TABLE products ADD COLUMN product_short_description TEXT NOT NULL DEFAULT ''",
+            "product_long_description": "ALTER TABLE products ADD COLUMN product_long_description TEXT NOT NULL DEFAULT ''",
         }
         for col, sql in migrations.items():
             if col not in product_cols:

@@ -318,6 +318,10 @@ class AdminWebService:
             stock_format_labels=str(data.get("stock_format_labels") or ""),
             stock_format_example=str(data.get("stock_format_example") or ""),
             delivery_format=str(data.get("delivery_format") or "auto"),
+            product_icon=str(data.get("product_icon") or ""),
+            product_custom_emoji_id=str(data.get("product_custom_emoji_id") or ""),
+            product_short_description=str(data.get("product_short_description") or ""),
+            product_long_description=str(data.get("product_long_description") or ""),
         )
         self.log(admin_id, "product.create", "product", str(product_id), {"name": data.get("name")})
         return product_id
@@ -334,7 +338,8 @@ class AdminWebService:
                 """
                 UPDATE products
                    SET category_id=?, name=?, description=?, currency=?, price_minor=?, cost_minor=?, warranty_text=?, is_active=?,
-                       stock_format=?, stock_format_labels=?, stock_format_example=?, delivery_format=?
+                       stock_format=?, stock_format_labels=?, stock_format_example=?, delivery_format=?,
+                       product_icon=?, product_custom_emoji_id=?, product_short_description=?, product_long_description=?
                  WHERE id=?
                 """,
                 (
@@ -350,6 +355,10 @@ class AdminWebService:
                     str(data.get("stock_format_labels") or "").strip(),
                     str(data.get("stock_format_example") or "").strip(),
                     str(data.get("delivery_format") or "auto").strip() or "auto",
+                    str(data.get("product_icon") or "").strip(),
+                    str(data.get("product_custom_emoji_id") or "").strip(),
+                    str(data.get("product_short_description") or "").strip(),
+                    str(data.get("product_long_description") or "").strip(),
                     product_id,
                 ),
             ).rowcount
@@ -366,6 +375,79 @@ class AdminWebService:
                 "Vào bot và bấm 🛒 Mua ngay để xem chi tiết mới nhất."
             )
             NotificationService(self.db).queue_product_update(product_id=product_id, title=title, message=message)
+
+    PRODUCT_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+    PRODUCT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+
+    @staticmethod
+    def _detect_image_ext(filename: str, data: bytes) -> str:
+        ext = Path(filename or "").suffix.lower()
+        if ext == ".jpeg":
+            ext = ".jpg"
+        if ext not in AdminWebService.PRODUCT_IMAGE_EXTS:
+            # Fall back to magic bytes when browser did not send a useful name.
+            if data.startswith(b"\xff\xd8\xff"):
+                return ".jpg"
+            if data.startswith(b"\x89PNG\r\n\x1a\n"):
+                return ".png"
+            if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+                return ".webp"
+            raise ValueError("Ảnh sản phẩm chỉ hỗ trợ JPG, PNG hoặc WebP")
+        signatures = {
+            ".jpg": lambda b: b.startswith(b"\xff\xd8\xff"),
+            ".png": lambda b: b.startswith(b"\x89PNG\r\n\x1a\n"),
+            ".webp": lambda b: b.startswith(b"RIFF") and b[8:12] == b"WEBP",
+        }
+        if not signatures[ext](data):
+            raise ValueError("Nội dung file không khớp định dạng ảnh đã chọn")
+        return ext
+
+    def save_product_image(self, product_id: int, *, filename: str, data: bytes, admin_id: int | None = None) -> str:
+        if not data:
+            raise ValueError("File ảnh trống")
+        if len(data) > self.PRODUCT_IMAGE_MAX_BYTES:
+            raise ValueError("Ảnh sản phẩm quá lớn. Giới hạn 5MB")
+        ext = self._detect_image_ext(filename, data)
+        media_dir = self.project_root / "media" / "products"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        # Remove previous local images for the same product so backup stays clean.
+        for old in media_dir.glob(f"product_{product_id}.*"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        path = media_dir / f"product_{product_id}{ext}"
+        path.write_bytes(data)
+        rel = path.relative_to(self.project_root).as_posix()
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "UPDATE products SET product_image_path=?, product_image_file_id='' WHERE id=?",
+                (rel, product_id),
+            ).rowcount
+            if row == 0:
+                raise ValueError("Không tìm thấy sản phẩm")
+        self.log(admin_id, "product.image.save", "product", str(product_id), {"path": rel, "size": len(data)})
+        return rel
+
+    def clear_product_image(self, product_id: int, *, admin_id: int | None = None) -> None:
+        product = self.get_product(product_id)
+        rel = str(product.get("product_image_path") or "")
+        if rel:
+            path = self.project_root / rel
+            try:
+                if path.exists() and path.is_file():
+                    path.unlink()
+            except OSError:
+                pass
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE products SET product_image_path='', product_image_file_id='' WHERE id=?", (product_id,))
+        self.log(admin_id, "product.image.clear", "product", str(product_id), {})
+
+    def update_product_image_file_id(self, product_id: int, file_id: str) -> None:
+        if not file_id:
+            return
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE products SET product_image_file_id=? WHERE id=?", (file_id, product_id))
 
     def delete_product(self, product_id: int, *, admin_id: int | None = None) -> str:
         """Safely delete a product.
@@ -945,7 +1027,12 @@ class AdminWebService:
             env_path = self.project_root / ".env"
             if include_env and env_path.exists():
                 zf.write(env_path, ".env")
-            zf.writestr("RESTORE_GUIDE.txt", "Giải nén file này vào thư mục dự án hoặc dùng trang Backup/Restore của Web Admin. File chính: data/shop.db. Không chia sẻ backup nếu có .env vì chứa token/API key.\n")
+            media_dir = self.project_root / "media" / "products"
+            if media_dir.exists():
+                for media_file in media_dir.rglob("*"):
+                    if media_file.is_file():
+                        zf.write(media_file, media_file.relative_to(self.project_root).as_posix())
+            zf.writestr("RESTORE_GUIDE.txt", "Giải nén file này vào thư mục dự án hoặc dùng trang Backup/Restore của Web Admin. File chính: data/shop.db. Backup cũng chứa media/products nếu bạn đã upload ảnh sản phẩm. Không chia sẻ backup nếu có .env vì chứa token/API key.\n")
         tmp_db.unlink(missing_ok=True)
         self.log(admin_id, "backup.create", "backup", target.name, {"include_env": include_env, "size": target.stat().st_size})
         return target
@@ -970,6 +1057,12 @@ class AdminWebService:
             if ".env" in names:
                 with zf.open(".env") as src, (self.project_root / ".env").open("wb") as dst:
                     shutil.copyfileobj(src, dst)
+            for name in names:
+                if name.startswith("media/products/") and not name.endswith("/"):
+                    target = self.project_root / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(name) as src, target.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
         self.log(admin_id, "backup.restore", "backup", str(path), {"safety_backup": str(safety)})
 
 

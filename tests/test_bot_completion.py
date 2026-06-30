@@ -206,3 +206,32 @@ class BotCompletionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class BotProductMediaViewsTest(unittest.TestCase):
+    def test_product_icons_custom_emoji_and_button_labels_render(self) -> None:
+        product = {
+            "id": 9,
+            "name": "ChatGPT Plus",
+            "price_minor": 153000,
+            "currency": "VND",
+            "available_stock": 12,
+            "description": "old desc",
+            "warranty_text": "24h",
+            "product_icon": "🤖",
+            "product_custom_emoji_id": "5368324170671202286",
+            "product_short_description": "Tài khoản mới",
+            "product_long_description": "Mô tả dài",
+            "product_image_path": "media/products/product_9.png",
+        }
+        rendered_list = views.product_list([product], "AI")
+        self.assertIn("tg-emoji", rendered_list)
+        self.assertIn("📦 12", rendered_list)
+        detail = views.product_detail(product)
+        self.assertIn("Tóm tắt", detail)
+        self.assertIn("Mô tả dài", detail)
+        self.assertTrue(views.product_has_image(product))
+        from nimo_shop.bot.keyboards import search_results_keyboard_rows
+        keyboard_rows = str(search_results_keyboard_rows([product]))
+        self.assertIn("🤖 ChatGPT Plus", keyboard_rows)
+        self.assertIn("📦 12", keyboard_rows)
+

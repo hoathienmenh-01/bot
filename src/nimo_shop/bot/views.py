@@ -53,6 +53,28 @@ def category_list(categories: list[dict]) -> str:
     return "🛒 <b>Chọn danh mục sản phẩm</b>\n\nBấm vào một danh mục bên dưới để xem sản phẩm."
 
 
+def _product_icon_html(product: dict) -> str:
+    icon = str(product.get("product_icon") or "📦").strip() or "📦"
+    custom_id = str(product.get("product_custom_emoji_id") or "").strip()
+    if custom_id.isdigit():
+        return f'<tg-emoji emoji-id="{h(custom_id)}">{h(icon[:2])}</tg-emoji>'
+    return h(icon)
+
+
+def product_button_label(product: dict) -> str:
+    icon = str(product.get("product_icon") or "📦").strip() or "📦"
+    stock = int(product.get("available_stock") or 0)
+    return f"{icon} {product['name']} | {fmt_money(int(product['price_minor']), product['currency'])} | 📦 {stock}"
+
+
+def product_image_path(product: dict) -> str:
+    return str(product.get("product_image_path") or "").strip()
+
+
+def product_has_image(product: dict) -> bool:
+    return bool(product_image_path(product))
+
+
 def product_list(products: list[dict], category_name: str | None = None) -> str:
     if not products:
         return "📦 Danh mục này hiện chưa có sản phẩm đang bán hoặc đã hết hàng."
@@ -60,27 +82,38 @@ def product_list(products: list[dict], category_name: str | None = None) -> str:
     lines = [title, ""]
     for product in products[:20]:
         lines.append(
-            f"#{product['id']} — <b>{h(product['name'])}</b> | "
+            f"{_product_icon_html(product)} <b>{h(product['name'])}</b> | "
             f"{fmt_money(int(product['price_minor']), product['currency'])} | "
-            f"Còn: {int(product.get('available_stock') or 0)}"
+            f"📦 {int(product.get('available_stock') or 0)}"
         )
-    lines.append("\nBấm vào sản phẩm bên dưới để xem chi tiết.")
+    lines.append("\nBấm vào sản phẩm bên dưới để xem ảnh, mô tả và chọn số lượng.")
     return "\n".join(lines)
-
 
 def product_detail(product: dict) -> str:
     stock = int(product.get("available_stock") or 0)
     status = "✅ Còn hàng" if stock > 0 else "❌ Hết hàng"
-    return (
-        f"🛒 <b>{h(product['name'])}</b>\n\n"
-        f"Giá: <b>{fmt_money(int(product['price_minor']), product['currency'])}</b>\n"
-        f"Tồn kho: <b>{stock}</b>\n"
-        f"Trạng thái: {status}\n\n"
-        f"📌 <b>Mô tả</b>\n{h(product.get('description') or 'Chưa có mô tả')}\n\n"
-        f"🛡 <b>Bảo hành</b>\n{h(product.get('warranty_text') or 'Theo chính sách shop')}\n\n"
-        "👇 Chọn số lượng muốn mua bên dưới. Nếu muốn mua số lượng khác, bấm <b>Nhập số lượng khác</b>."
-    )
-
+    title = f"{_product_icon_html(product)} <b>{h(product['name'])}</b>"
+    short = str(product.get("product_short_description") or "").strip()
+    long_desc = str(product.get("product_long_description") or "").strip()
+    desc = long_desc or str(product.get("description") or "").strip() or "Chưa có mô tả"
+    parts = [
+        title,
+        "",
+        f"Giá: <b>{fmt_money(int(product['price_minor']), product['currency'])}</b>",
+        f"Tồn kho: <b>{stock}</b>",
+        f"Trạng thái: {status}",
+    ]
+    if short:
+        parts.extend(["", f"⭐ <b>Tóm tắt</b>\n{h(short)}"])
+    parts.extend([
+        "",
+        f"📌 <b>Mô tả</b>\n{h(desc)}",
+        "",
+        f"🛡 <b>Bảo hành</b>\n{h(product.get('warranty_text') or 'Theo chính sách shop')}",
+        "",
+        "👇 Chọn số lượng muốn mua bên dưới. Nếu muốn mua số lượng khác, bấm <b>Nhập số lượng khác</b>.",
+    ])
+    return "\n".join(parts)
 
 def order_created(order: dict, balances: dict[str, int] | None = None) -> str:
     current_balance = int((balances or {}).get(order["currency"], 0))

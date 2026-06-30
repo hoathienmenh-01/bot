@@ -322,6 +322,17 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         session = self._require_login()
         if not session:
             return
+        if parsed.path.startswith("/media/products/"):
+            rel = parsed.path.lstrip("/")
+            file_path = (self.service.project_root / rel).resolve()
+            media_root = (self.service.project_root / "media" / "products").resolve()
+            if not str(file_path).startswith(str(media_root)) or not file_path.exists() or not file_path.is_file():
+                self.send_error(404)
+                return
+            ext = file_path.suffix.lower()
+            ctype = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(ext, "application/octet-stream")
+            self._send(file_path.read_bytes(), content_type=ctype)
+            return
         if parsed.path == "/backup/download":
             try:
                 include_env = parse_qs(parsed.query).get("include_env", ["1"])[0] != "0"
@@ -394,6 +405,9 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return self._page("categories", self._categories(), active="/categories")
         if path == "/products":
             return self._page("products", self._products(query), active="/products")
+        if path == "/products/preview":
+            product_id = int(query.get("id", ["0"])[0] or 0)
+            return self._page("products", self._product_preview(product_id), active="/products")
         if path == "/stock":
             return self._page("stock", self._stock(query), active="/stock")
         if path == "/orders":
@@ -447,10 +461,19 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             self.service.update_category(int(form["id"]), name=form.get("name", ""), sort_order=int(form.get("sort_order") or 100), is_active=form.get("is_active") == "on", admin_id=admin_id)
             return "/categories"
         if path == "/products/create":
-            self.service.create_product(form, admin_id=admin_id)
+            product_id = self.service.create_product(form, admin_id=admin_id)
+            image_bytes = form.get("product_image_bytes")
+            if isinstance(image_bytes, (bytes, bytearray)) and image_bytes:
+                self.service.save_product_image(product_id, filename=str(form.get("product_image_filename") or ""), data=bytes(image_bytes), admin_id=admin_id)
             return "/products"
         if path == "/products/update":
-            self.service.update_product(int(form["id"]), form, admin_id=admin_id)
+            product_id = int(form["id"])
+            self.service.update_product(product_id, form, admin_id=admin_id)
+            if str(form.get("clear_product_image") or "").lower() in {"1", "true", "on", "yes"}:
+                self.service.clear_product_image(product_id, admin_id=admin_id)
+            image_bytes = form.get("product_image_bytes")
+            if isinstance(image_bytes, (bytes, bytearray)) and image_bytes:
+                self.service.save_product_image(product_id, filename=str(form.get("product_image_filename") or ""), data=bytes(image_bytes), admin_id=admin_id)
             return "/products"
         if path == "/products/delete":
             self.service.delete_product(int(form["id"]), admin_id=admin_id)
@@ -558,16 +581,6 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         cur = str(current or "auto")
         return "".join(f'<option value="{key}" {selected(cur, key)}>{esc(str(meta["name"]))}</option>' for key, meta in STOCK_FORMATS.items())
 
-    def _product_form(self, product: dict | None = None) -> str:
-        is_edit = product is not None
-        action = "/products/update" if is_edit else "/products/create"
-        title = "Sửa sản phẩm" if is_edit else "Thêm sản phẩm mới"
-        button = "Lưu sản phẩm" if is_edit else "Tạo sản phẩm"
-        product = product or {"id": "", "category_id": "", "name": "", "currency": "VND", "price_minor": 0, "cost_minor": 0, "description": "", "warranty_text": "", "is_active": 1, "stock_format": "auto", "stock_format_labels": "", "stock_format_example": "", "delivery_format": "auto"}
-        active = bool(product.get("is_active", 1))
-        hidden_id = f'<input type="hidden" name="id" value="{product["id"]}">' if is_edit else ""
-        return f'''<div class="card"><div class="section-head"><div><h2>{title}</h2><p class="muted">Nhập thông tin khách sẽ nhìn thấy khi mua. Giá vốn chỉ dùng để tính lãi, khách không thấy.</p></div><a class="btn secondary" href="/products">← Quay lại danh sách</a></div><form method="post" action="{action}" class="form-grid">{self._form_csrf()}{hidden_id}<label>Danh mục<select name="category_id">{self._category_options(product.get("category_id") or "")}</select><div class="help">Chọn nhóm sản phẩm hiển thị trong menu Mua ngay.</div></label><label>Tên sản phẩm<input name="name" value="{esc(product.get("name"))}" placeholder="ChatGPT Plus 1 tháng" required><div class="help">Tên càng rõ càng ít khách hỏi lại.</div></label><label>Tiền tệ<select name="currency"><option {selected(product.get("currency"),"VND")}>VND</option><option {selected(product.get("currency"),"USDT")}>USDT</option><option {selected(product.get("currency"),"USD")}>USD</option></select></label><label>Giá bán<input name="price" inputmode="decimal" value="{amount_input(product.get("price_minor"), product.get("currency") or "VND")}" placeholder="150000" required><div class="help">VND nhập số tiền thường, ví dụ 150000.</div></label><label>Giá vốn<input name="cost" inputmode="decimal" value="{amount_input(product.get("cost_minor"), product.get("currency") or "VND")}" placeholder="100000"><div class="help">Dùng để tính lợi nhuận, có thể để 0.</div></label><label>Trạng thái<select name="is_active"><option value="1" {"selected" if active else ""}>Đang bán</option><option value="0" {"selected" if not active else ""}>Ẩn khỏi bot</option></select><div class="help">Ẩn sản phẩm nếu hết hàng hoặc ngừng bán.</div></label><label>Định dạng dữ liệu kho<select name="stock_format">{self._stock_format_options(product.get("stock_format") or "auto")}</select><div class="help">Mỗi sản phẩm có thể có kiểu tài khoản khác nhau. Chọn đúng kiểu để hệ thống nhận diện, preview và giao file rõ ràng.</div></label><label>Kiểu giao hàng<select name="delivery_format"><option value="auto" {selected(product.get("delivery_format"),"auto")}>Theo cấu hình chung</option><option value="raw" {selected(product.get("delivery_format"),"raw")}>Giao nguyên dòng</option><option value="labeled" {selected(product.get("delivery_format"),"labeled")}>Giao có nhãn cột</option></select><div class="help">Giao có nhãn sẽ biến email|pass thành Email: ... / Mật khẩu: ... trong file giao.</div></label><label class="full">Nhãn cột dữ liệu<input name="stock_format_labels" value="{esc(product.get("stock_format_labels") or "")}" placeholder="Email|Mật khẩu|2FA"><div class="help">Tùy chọn. Dùng khi sản phẩm có định dạng riêng, ví dụ: Email|Mật khẩu|2FA hoặc UID|Mật khẩu|Cookie|Token.</div></label><label class="full">Ví dụ nhập kho cho sản phẩm này<input name="stock_format_example" value="{esc(product.get("stock_format_example") or "")}" placeholder="user@example.com|password|2FA"><div class="help">Hiện trong trang Nhập kho để admin biết sản phẩm này cần file/dòng kiểu gì.</div></label><label class="full">Mô tả sản phẩm<textarea name="description" placeholder="Tài khoản dùng 30 ngày, giao tự động sau khi thanh toán...">{esc(product.get("description") or "")}</textarea></label><label class="full">Chính sách bảo hành<textarea name="warranty_text" placeholder="Bảo hành 1 đổi 1 trong 30 ngày nếu lỗi do shop...">{esc(product.get("warranty_text") or "")}</textarea></label>{("<label class='full checkbox-row'><input type='checkbox' name='notify_users' checked> Gửi thông báo cập nhật sản phẩm trên bot cho khách đã từng dùng bot</label>" if is_edit else "")}<div class="full toolbar"><button>{button}</button><a class="btn secondary" href="/products">Hủy</a></div></form></div>'''
-
     def _products(self, query: dict[str, list[str]]) -> str:
         if query.get("new", [""])[0]:
             return self._product_form(None)
@@ -580,9 +593,105 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             is_active = bool(p["is_active"])
             status = '<span class="status active">Đang bán</span>' if is_active else '<span class="status inactive">Đã ẩn</span>'
             delete_label = "Xóa" if int(p.get("sold_stock") or 0) == 0 else "Ẩn"
-            rows.append(f'''<tr><td><div class="product-title">{esc(p["name"])}</div><div class="muted">ID #{p["id"]} · {esc(p.get("category_name") or "Chưa có danh mục")}</div></td><td>{money(p["price_minor"], p["currency"])}<br><span class="muted">Vốn: {money(p["cost_minor"], p["currency"])}</span></td><td><span class="pill">Còn {p["available_stock"]}</span> <span class="pill">Giữ {p["reserved_stock"]}</span> <span class="pill">Bán {p["sold_stock"]}</span></td><td>{status}</td><td><div class="action-row"><a class="btn small secondary" href="/products?edit={p["id"]}">Sửa</a><form method="post" action="/products/delete" style="display:inline" onsubmit="return confirm('Bạn chắc chắn muốn xóa/ẩn sản phẩm này?');">{self._form_csrf()}<input type="hidden" name="id" value="{p["id"]}"><button class="small danger">{delete_label}</button></form><a class="btn small ghost" href="/stock?product_id={p["id"]}">Nhập kho</a></div></td></tr>''')
+            thumb = self._product_thumb(p, size=48)
+            icon = esc(p.get("product_icon") or "📦")
+            row = (
+                f'<tr><td><div style="display:flex;gap:10px;align-items:center">{thumb}<div>'
+                f'<div class="product-title">{icon} {esc(p["name"])}</div>'
+                f'<div class="muted">ID #{p["id"]} · {esc(p.get("category_name") or "Chưa có danh mục")}</div></div></div></td>'
+                f'<td>{money(p["price_minor"], p["currency"])}<br><span class="muted">Vốn: {money(p["cost_minor"], p["currency"])}</span></td>'
+                f'<td><span class="pill">Còn {p["available_stock"]}</span> <span class="pill">Giữ {p["reserved_stock"]}</span> <span class="pill">Bán {p["sold_stock"]}</span></td>'
+                f'<td>{status}</td><td><div class="action-row">'
+                f'<a class="btn small secondary" href="/products?edit={p["id"]}">Sửa</a>'
+                f'<a class="btn small ghost" href="/products/preview?id={p["id"]}">Preview</a>'
+                f'<form method="post" action="/products/delete" style="display:inline" onsubmit="return confirm(\'Bạn chắc chắn muốn xóa/ẩn sản phẩm này?\');">'
+                f'{self._form_csrf()}<input type="hidden" name="id" value="{p["id"]}"><button class="small danger">{delete_label}</button></form>'
+                f'<a class="btn small ghost" href="/stock?product_id={p["id"]}">Nhập kho</a></div></td></tr>'
+            )
+            rows.append(row)
         empty = '<tr><td colspan="5"><div class="alert">Chưa có sản phẩm. Bấm “Thêm sản phẩm” để tạo sản phẩm đầu tiên.</div></td></tr>' if not rows else ""
-        return f'''<div class="card"><div class="section-head"><div><h2>Danh sách sản phẩm</h2><p class="muted">Chỉ hiển thị danh sách và nút thao tác rõ ràng. Bấm Thêm/Sửa để mở form riêng, không sửa lẫn trong bảng.</p></div><a class="btn" href="/products?new=1">＋ Thêm sản phẩm</a></div></div><div class="card table-wrap"><table class="premium-table"><tr><th>Sản phẩm</th><th>Giá</th><th>Kho</th><th>Trạng thái</th><th>Thao tác</th></tr>{empty}{"".join(rows)}</table></div>'''
+        return (
+            '<div class="card"><div class="section-head"><div><h2>Danh sách sản phẩm</h2>'
+            '<p class="muted">Bấm Thêm/Sửa để upload ảnh, icon, custom emoji ID và cấu hình cách khách nhìn thấy sản phẩm trên bot.</p></div>'
+            '<a class="btn" href="/products?new=1">＋ Thêm sản phẩm</a></div></div>'
+            f'<div class="card table-wrap"><table class="premium-table"><tr><th>Sản phẩm</th><th>Giá</th><th>Kho</th><th>Trạng thái</th><th>Thao tác</th></tr>{empty}{"".join(rows)}</table></div>'
+        )
+
+    def _media_url(self, product: dict) -> str:
+        rel = str(product.get("product_image_path") or "").strip()
+        if not rel or not rel.startswith("media/products/"):
+            return ""
+        return "/" + rel
+
+    def _product_thumb(self, product: dict, *, size: int = 56) -> str:
+        url = self._media_url(product)
+        if not url:
+            icon = esc(product.get("product_icon") or "📦")
+            return f'<div style="width:{size}px;height:{size}px;border-radius:14px;display:grid;place-items:center;background:var(--panel2);font-size:24px">{icon}</div>'
+        return f'<img src="{esc(url)}" alt="Ảnh sản phẩm" style="width:{size}px;height:{size}px;object-fit:cover;border-radius:14px;border:1px solid var(--line)">'
+
+    def _product_form(self, product: dict | None = None) -> str:
+        is_edit = product is not None
+        action = "/products/update" if is_edit else "/products/create"
+        title = tr(self._theme_lang()[0], "edit_product") if is_edit else tr(self._theme_lang()[0], "add_product")
+        product = product or {
+            "id": "", "category_id": "", "name": "", "currency": "VND", "price_minor": 0, "cost_minor": 0,
+            "description": "", "warranty_text": "", "is_active": 1, "stock_format": "auto", "stock_format_labels": "",
+            "stock_format_example": "", "delivery_format": "auto", "product_icon": "📦", "product_custom_emoji_id": "",
+            "product_image_path": "", "product_image_file_id": "", "product_short_description": "", "product_long_description": "",
+        }
+        active = bool(product.get("is_active", 1))
+        hidden_id = f'<input type="hidden" name="id" value="{product["id"]}">' if is_edit else ""
+        preview_link = f'<a class="btn ghost" href="/products/preview?id={product["id"]}">👁 Xem trước</a>' if is_edit else ""
+        fmt_options = ''.join(f'<option value="{key}" {selected(product.get("stock_format"), key)}>{esc(meta["name"])}</option>' for key, meta in STOCK_FORMATS.items())
+        delivery_options = ''.join([
+            f'<option value="auto" {selected(product.get("delivery_format"), "auto")}>Tự động theo định dạng kho</option>',
+            f'<option value="raw" {selected(product.get("delivery_format"), "raw")}>Giao nguyên dòng</option>',
+            f'<option value="labeled" {selected(product.get("delivery_format"), "labeled")}>Giao có nhãn cột</option>',
+        ])
+        image_block = ""
+        if is_edit:
+            if product.get("product_image_path"):
+                image_block = (
+                    f'<div class="info-box full"><b>Ảnh hiện tại</b><br>{self._product_thumb(product, size=120)}'
+                    f'<br><code>{esc(product.get("product_image_path"))}</code><br>'
+                    '<label style="margin-top:10px"><input type="checkbox" name="clear_product_image" value="1" style="width:auto;margin-right:7px"> Xóa ảnh sản phẩm hiện tại</label></div>'
+                )
+            else:
+                image_block = '<div class="info-box full">Sản phẩm này chưa có ảnh. Upload ảnh JPG/PNG/WebP để bot hiển thị card sản phẩm đẹp hơn.</div>'
+        notify = '<label class="full"><input type="checkbox" name="notify_users" value="1" style="width:auto;margin-right:8px"> Gửi thông báo cập nhật sản phẩm trên bot</label>' if is_edit else ''
+        return f'''<div class="card"><div class="section-head"><div><h2>{title}</h2><p class="muted">Nhập thông tin khách sẽ nhìn thấy khi mua. Icon/ảnh giúp danh sách sản phẩm nhìn giống shop premium.</p></div><div class="action-row"><a class="btn secondary" href="/products">← Quay lại danh sách</a>{preview_link}</div></div>
+        <form method="post" action="{action}" class="form-grid" enctype="multipart/form-data">{self._form_csrf()}{hidden_id}
+        <label>Danh mục<select name="category_id">{self._category_options(product.get("category_id") or "")}</select><div class="help">Chọn nhóm sản phẩm hiển thị trong menu Mua ngay.</div></label>
+        <label>Tên sản phẩm<input name="name" value="{esc(product.get("name"))}" placeholder="ChatGPT Plus 1 tháng" required><div class="help">Tên càng rõ càng ít khách hỏi lại.</div></label>
+        <label>Icon thường<input name="product_icon" value="{esc(product.get("product_icon") or "")}" placeholder="🤖 / ▶️ / 🟣 / 🔑"><div class="help">Dùng trong nút danh sách sản phẩm. Dùng emoji thường là ổn định nhất.</div></label>
+        <label>Custom Emoji ID<input name="product_custom_emoji_id" value="{esc(product.get("product_custom_emoji_id") or "")}" placeholder="5368324170671202286"><div class="help">Dành cho bot/account Premium. Hiển thị trong mô tả bằng tag tg-emoji nếu Telegram hỗ trợ.</div></label>
+        <label>Tiền tệ<select name="currency"><option {selected(product.get("currency"),"VND")}>VND</option><option {selected(product.get("currency"),"USDT")}>USDT</option><option {selected(product.get("currency"),"USD")}>USD</option></select></label>
+        <label>Giá bán<input name="price" inputmode="decimal" value="{amount_input(product.get("price_minor"), product.get("currency") or "VND")}" placeholder="150000" required><div class="help">VND nhập số tiền thường, ví dụ 150000.</div></label>
+        <label>Giá vốn<input name="cost" inputmode="decimal" value="{amount_input(product.get("cost_minor"), product.get("currency") or "VND")}" placeholder="100000"><div class="help">Dùng để tính lợi nhuận, có thể để 0.</div></label>
+        <label>Trạng thái<select name="is_active"><option value="1" {"selected" if active else ""}>Đang bán</option><option value="0" {"selected" if not active else ""}>Tạm ẩn</option></select></label>
+        <label class="full">Ảnh sản phẩm<input type="file" name="product_image" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"><div class="help">Chỉ JPG/PNG/WebP, tối đa 5MB. Bot sẽ dùng ảnh này ở màn chi tiết sản phẩm và lưu Telegram file_id sau lần gửi đầu.</div></label>
+        {image_block}
+        <label class="full">Mô tả ngắn<input name="product_short_description" value="{esc(product.get("product_short_description") or "")}" placeholder="Dùng 30 ngày, bảo hành 24h"><div class="help">Hiện trong card chi tiết và preview.</div></label>
+        <label class="full">Mô tả chi tiết<textarea name="product_long_description" placeholder="Mô tả quyền lợi, điều kiện bảo hành, cách sử dụng sau mua...">{esc(product.get("product_long_description") or "")}</textarea><div class="help">Có thể để trống, bot sẽ dùng mô tả cũ bên dưới.</div></label>
+        <label class="full">Mô tả cũ / ghi chú sản phẩm<textarea name="description" placeholder="Tài khoản dùng 30 ngày, không đổi email...">{esc(product.get("description") or "")}</textarea></label>
+        <label class="full">Bảo hành<textarea name="warranty_text" placeholder="1 đổi 1 trong 24h nếu lỗi đăng nhập">{esc(product.get("warranty_text") or "")}</textarea></label>
+        <label>Định dạng dữ liệu kho<select name="stock_format">{fmt_options}</select><div class="help">Mỗi sản phẩm có thể có format riêng: Email|Pass|2FA, Email / Pass, UID|Pass|Cookie|Token...</div></label>
+        <label>Kiểu giao hàng<select name="delivery_format">{delivery_options}</select><div class="help">Giao có nhãn giúp file giao hàng dễ đọc hơn.</div></label>
+        <label class="full">Nhãn cột dữ liệu<input name="stock_format_labels" value="{esc(product.get("stock_format_labels") or "")}" placeholder="Email|Mật khẩu|2FA"><div class="help">Dùng khi giao có nhãn. Cách nhau bằng |.</div></label>
+        <label class="full">Ví dụ nhập kho<input name="stock_format_example" value="{esc(product.get("stock_format_example") or "")}" placeholder="email@example.com|password|2FA"></label>
+        {notify}
+        <button>{tr(self._theme_lang()[0],"save")}</button></form></div>'''
+
+    def _product_preview(self, product_id: int) -> str:
+        p = self.service.get_product(product_id)
+        icon = esc(p.get("product_icon") or "📦")
+        custom = esc(p.get("product_custom_emoji_id") or "")
+        img = self._product_thumb(p, size=220)
+        short = esc(p.get("product_short_description") or p.get("description") or "Chưa có mô tả ngắn")
+        long = esc(p.get("product_long_description") or p.get("description") or "Chưa có mô tả chi tiết").replace("\n", "<br>")
+        return f'''<div class="card"><div class="section-head"><div><h2>👁 Preview sản phẩm trên bot</h2><p class="muted">Đây là bản xem trước gần giống card mà khách thấy khi bấm vào sản phẩm.</p></div><div class="action-row"><a class="btn secondary" href="/products?edit={p["id"]}">Sửa sản phẩm</a><a class="btn ghost" href="/products">Danh sách</a></div></div>
+        <div class="grid2"><div class="card" style="max-width:460px">{img}<h2>{icon} {esc(p["name"])}</h2><p><b>Giá:</b> {money(p["price_minor"], p["currency"])} · <b>Tồn:</b> {int(p.get("available_stock") or 0)}</p><p>{short}</p><hr><p>{long}</p><p><b>Bảo hành:</b> {esc(p.get("warranty_text") or "Theo chính sách shop")}</p><p class="muted">Custom emoji ID: <code>{custom or "chưa đặt"}</code><br>Image path: <code>{esc(p.get("product_image_path") or "chưa có")}</code><br>Telegram file_id: <code>{esc(p.get("product_image_file_id") or "chưa có")}</code></p></div><div class="card"><h3>Gợi ý hiển thị trong danh sách</h3><p><code>{icon} {esc(p["name"])} | {money(p["price_minor"], p["currency"])} | 📦 {int(p.get("available_stock") or 0)}</code></p><p class="muted">Ảnh thật chỉ hiện ở màn chi tiết sản phẩm, không nhét trực tiếp vào từng nút danh sách để tránh nặng và loạn chat.</p></div></div></div>'''
 
     def _stock(self, query: dict[str, list[str]]) -> str:
         products = self.service.list_products()

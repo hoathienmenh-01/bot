@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import traceback
+from pathlib import Path
 
 from nimo_shop.bot import views
 from nimo_shop.bot.i18n import language_display, menu_rows, menu_texts, t
@@ -67,7 +68,52 @@ def build_dispatcher(settings: Settings, db: Database):
         except Exception as exc:
             if "message is not modified" in str(exc).lower():
                 return
-            await callback.message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+            try:
+                # If current single-panel message is a product photo, keep the
+                # same panel by changing caption instead of sending a new chat item.
+                await callback.message.edit_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+            except Exception:
+                await callback.message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+    def update_product_image_file_id(product_id: int, file_id: str) -> None:
+        if not file_id:
+            return
+        try:
+            with db.transaction() as conn:
+                conn.execute("UPDATE products SET product_image_file_id=? WHERE id=?", (file_id, product_id))
+        except Exception:
+            pass
+
+    def product_local_image_path(product: dict) -> Path | None:
+        rel = str(product.get("product_image_path") or "").strip()
+        if not rel:
+            return None
+        path = Path(rel)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path if path.exists() and path.is_file() else None
+
+    async def edit_product_panel(callback, product: dict) -> None:
+        text = views.product_detail(product)
+        reply_markup = product_detail_keyboard(int(product["id"]), int(product.get("available_stock") or 0))
+        local_path = product_local_image_path(product)
+        file_id = str(product.get("product_image_file_id") or "").strip()
+        if local_path or file_id:
+            try:
+                from aiogram.types import FSInputFile, InputMediaPhoto
+                media_obj = file_id or FSInputFile(str(local_path))
+                result = await callback.message.edit_media(
+                    media=InputMediaPhoto(media=media_obj, caption=text, parse_mode="HTML"),
+                    reply_markup=reply_markup,
+                )
+                photos = getattr(result, "photo", None) or []
+                if photos:
+                    update_product_image_file_id(int(product["id"]), str(photos[-1].file_id))
+                return
+            except Exception:
+                # Fallback to text-only so product still works if Telegram rejects media.
+                pass
+        await edit_or_answer_callback(callback, text, reply_markup=reply_markup)
 
     async def edit_or_answer_by_id(message, chat_id: int, message_id: int, text: str, *, reply_markup=None) -> None:
         try:
@@ -637,11 +683,7 @@ def build_dispatcher(settings: Settings, db: Database):
         if not product:
             await edit_or_answer_callback(callback, "❌ Sản phẩm không tồn tại hoặc đã tắt bán.")
         else:
-            await edit_or_answer_callback(
-                callback,
-                views.product_detail(product),
-                reply_markup=product_detail_keyboard(product_id, int(product.get("available_stock") or 0)),
-            )
+            await edit_product_panel(callback, product)
         await callback.answer()
 
     async def create_order_and_edit_callback(callback: CallbackQuery, user_id: int, product_id: int, quantity: int) -> None:

@@ -404,3 +404,47 @@ class WebAdminV22StockUploadTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
+
+class WebAdminV24ProductMediaTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db = Database(self.root / "shop.db")
+        self.web = AdminWebService(self.db, project_root=self.root)
+        self.web.init(bootstrap_username="owner", bootstrap_password="StrongPass123")
+        self.admin = int(self.web.authenticate("owner", "StrongPass123")["id"])
+        self.cat = self.web.create_category("Media", admin_id=self.admin)
+        self.product = self.web.create_product({
+            "category_id": str(self.cat),
+            "name": "ChatGPT Plus with image",
+            "currency": "VND",
+            "price": "150000",
+            "cost": "100000",
+            "description": "Old description",
+            "product_icon": "🤖",
+            "product_custom_emoji_id": "5368324170671202286",
+            "product_short_description": "Short desc",
+            "product_long_description": "Long desc",
+            "warranty_text": "24h",
+        }, admin_id=self.admin)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_product_image_upload_validation_preview_and_backup_media(self) -> None:
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        rel = self.web.save_product_image(self.product, filename="cover.png", data=png, admin_id=self.admin)
+        self.assertEqual(rel, f"media/products/product_{self.product}.png")
+        product = self.web.get_product(self.product)
+        self.assertEqual(product["product_icon"], "🤖")
+        self.assertEqual(product["product_custom_emoji_id"], "5368324170671202286")
+        self.assertTrue((self.root / product["product_image_path"]).exists())
+        self.web.update_product_image_file_id(self.product, "telegram-file-id")
+        self.assertEqual(self.web.get_product(self.product)["product_image_file_id"], "telegram-file-id")
+        with self.assertRaises(ValueError):
+            self.web.save_product_image(self.product, filename="bad.gif", data=b"GIF89a", admin_id=self.admin)
+        backup = self.web.create_backup(include_env=False, admin_id=self.admin)
+        import zipfile
+        with zipfile.ZipFile(backup) as zf:
+            self.assertIn(f"media/products/product_{self.product}.png", zf.namelist())
+

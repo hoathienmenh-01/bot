@@ -60,8 +60,14 @@ def categories_keyboard(categories: list[dict]):
     return build_inline_keyboard(rows)
 
 
+def _product_button_label(p: dict) -> str:
+    from nimo_shop.money import fmt_money
+    icon = str(p.get("product_icon") or "📦").strip() or "📦"
+    return f"{icon} {p['name']} | {fmt_money(int(p['price_minor']), p['currency'])} | 📦 {int(p.get('available_stock') or 0)}"
+
+
 def products_keyboard(products: list[dict], category_id: int | None = None):
-    rows = [[(f"{p['name']} — còn {int(p.get('available_stock') or 0)}", f"prod:{p['id']}")] for p in products]
+    rows = [[(_product_button_label(p), f"prod:{p['id']}")] for p in products]
     if category_id is not None:
         rows.append([("⬅️ Danh mục", "buy:categories")])
     rows.append([("⬅️ Menu chính", "menu:main")])
@@ -134,12 +140,12 @@ def support_keyboard():
 
 
 def search_results_keyboard(products: list[dict]):
-    rows = [[(f"{p['name']} — còn {int(p.get('available_stock') or 0)}", f"prod:{p['id']}")] for p in products[:20]]
+    rows = [[(_product_button_label(p), f"prod:{p['id']}")] for p in products[:20]]
     rows.append([("🛒 Xem danh mục", "buy:categories"), ("🏠 Menu", "menu:main")])
     return build_inline_keyboard(rows)
 
 
 def search_results_keyboard_rows(products: list[dict]) -> list[list[tuple[str, str]]]:
-    rows = [[(f"{p['name']} — còn {int(p.get('available_stock') or 0)}", f"prod:{p['id']}")] for p in products[:20]]
+    rows = [[(_product_button_label(p), f"prod:{p['id']}")] for p in products[:20]]
     rows.append([("🛒 Xem danh mục", "buy:categories"), ("🏠 Menu", "menu:main")])
     return rows

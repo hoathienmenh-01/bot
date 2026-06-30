@@ -29,6 +29,12 @@ class CatalogService:
         stock_format_labels: str = "",
         stock_format_example: str = "",
         delivery_format: str = "auto",
+        product_icon: str = "",
+        product_custom_emoji_id: str = "",
+        product_image_path: str = "",
+        product_image_file_id: str = "",
+        product_short_description: str = "",
+        product_long_description: str = "",
     ) -> int:
         if not name.strip():
             raise ValueError("product name is required")
@@ -38,10 +44,10 @@ class CatalogService:
         with self.db.transaction() as conn:
             c = conn.execute(
                 """
-                INSERT INTO products(category_id, name, description, currency, price_minor, warranty_text, cost_minor, stock_format, stock_format_labels, stock_format_example, delivery_format)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO products(category_id, name, description, currency, price_minor, warranty_text, cost_minor, stock_format, stock_format_labels, stock_format_example, delivery_format, product_icon, product_custom_emoji_id, product_image_path, product_image_file_id, product_short_description, product_long_description)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                (category_id, name.strip(), description.strip(), cur, price_minor, warranty_text.strip(), cost_minor, stock_format.strip() or "auto", stock_format_labels.strip(), stock_format_example.strip(), delivery_format.strip() or "auto"),
+                (category_id, name.strip(), description.strip(), cur, price_minor, warranty_text.strip(), cost_minor, stock_format.strip() or "auto", stock_format_labels.strip(), stock_format_example.strip(), delivery_format.strip() or "auto", product_icon.strip(), product_custom_emoji_id.strip(), product_image_path.strip(), product_image_file_id.strip(), product_short_description.strip(), product_long_description.strip()),
             )
             return int(c.lastrowid)
 
