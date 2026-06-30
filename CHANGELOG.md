@@ -31,3 +31,11 @@
 - Added admin broadcast/notification queue managed from Web Admin.
 - Added backup download using SQLite backup API to avoid copying a hot WAL database.
 - Added tests for product search, backup download, managed bot CRUD, and notification queue.
+
+## v1.9.0 - Single Panel Navigation / Large Delivery Files
+- Telegram inline callback flow now edits the current control message instead of sending a new bot message for category, product, quantity, payment, wallet, history, language, and support panels.
+- `/start` now opens an inline control panel so users can navigate the shop from one message instead of scrolling through many bot messages.
+- Custom quantity prompt keeps the same control panel; after the user sends the number, the bot edits the original panel into the order/payment screen.
+- Large delivered orders are exported as downloadable TXT files instead of dumping hundreds/thousands of accounts into chat.
+- Added `/taidon ORD...`, `/download_order ORD...`, and `/export_order ORD...` so customers can download an already-delivered order again.
+- Added regression tests for large delivery export and single-message navigation callback rows.

@@ -97,6 +97,31 @@ class OrderService:
         with self.db.connect() as conn:
             return self._get_order_in_conn(conn, order_id)
 
+    def get_order_by_public_code(self, public_code: str, *, expected_user_id: int | None = None) -> dict:
+        code = (public_code or "").strip().upper()
+        if not code:
+            raise ValueError("order code is required")
+        with self.db.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT o.id
+                  FROM orders o
+                 WHERE UPPER(o.public_code)=?
+                """,
+                (code,),
+            ).fetchone()
+            if not row:
+                raise ValueError("order not found")
+            order = self._get_order_in_conn(conn, int(row["id"]))
+            self._assert_owner(order, expected_user_id)
+            return order
+
+    def delivery_for_order(self, order_id: int, *, expected_user_id: int | None = None) -> list[dict]:
+        with self.db.connect() as conn:
+            order = self._get_order_in_conn(conn, order_id)
+            self._assert_owner(order, expected_user_id)
+            return self._delivery_in_conn(conn, order_id)
+
     @staticmethod
     def _assert_owner(order: dict, expected_user_id: int | None) -> None:
         if expected_user_id is not None and int(order["user_id"]) != int(expected_user_id):

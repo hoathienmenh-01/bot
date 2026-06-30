@@ -13,6 +13,7 @@ from nimo_shop.bot.keyboards import (
     build_reply_keyboard,
     categories_keyboard,
     language_keyboard,
+    main_inline_keyboard,
     order_payment_keyboard,
     product_detail_keyboard,
     products_keyboard,
@@ -50,8 +51,76 @@ def build_dispatcher(settings: Settings, db: Database):
     payments = PaymentService(db, deposit_expires_minutes=settings.deposit_expires_minutes)
     finance = FinanceService(db)
     audit = AuditService(db)
-    pending_quantity_product_by_tg: dict[int, int] = {}
+    pending_quantity_product_by_tg: dict[int, tuple[int, int, int]] = {}
     pending_search_by_tg: set[int] = set()
+
+
+    async def edit_or_answer_message(message, text: str, *, reply_markup=None) -> None:
+        try:
+            await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        except Exception:
+            await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+    async def edit_or_answer_callback(callback, text: str, *, reply_markup=None) -> None:
+        try:
+            await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            await callback.message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+    async def edit_or_answer_by_id(message, chat_id: int, message_id: int, text: str, *, reply_markup=None) -> None:
+        try:
+            await message.bot.edit_message_text(
+                text,
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+        except Exception:
+            await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+    async def send_delivery_payload(message, order: dict, delivery_rows: list[dict], *, edit_chat_id: int | None = None, edit_message_id: int | None = None) -> None:
+        text = views.delivery(order, delivery_rows)
+        if edit_chat_id is not None and edit_message_id is not None:
+            await edit_or_answer_by_id(message, edit_chat_id, edit_message_id, text)
+        else:
+            await message.answer(text, parse_mode="HTML")
+        if views.delivery_needs_file(order, delivery_rows):
+            try:
+                from aiogram.types import BufferedInputFile
+                data = views.delivery_file_text(order, delivery_rows).encode("utf-8")
+                doc = BufferedInputFile(data, filename=views.delivery_filename(order))
+                await message.answer_document(
+                    doc,
+                    caption=(
+                        f"📎 File thông tin hàng cho đơn {views.h(order['public_code'])}. "
+                        "Hãy tải xuống và lưu lại."
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                await message.answer(f"⚠️ Không gửi được file giao hàng: <code>{views.h(exc)}</code>", parse_mode="HTML")
+
+    async def edit_delivery_payload(callback, order: dict, delivery_rows: list[dict]) -> None:
+        text = views.delivery(order, delivery_rows)
+        await edit_or_answer_callback(callback, text)
+        if views.delivery_needs_file(order, delivery_rows):
+            try:
+                from aiogram.types import BufferedInputFile
+                data = views.delivery_file_text(order, delivery_rows).encode("utf-8")
+                doc = BufferedInputFile(data, filename=views.delivery_filename(order))
+                await callback.message.answer_document(
+                    doc,
+                    caption=(
+                        f"📎 File thông tin hàng cho đơn {views.h(order['public_code'])}. "
+                        "Hãy tải xuống và lưu lại."
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                await callback.message.answer(f"⚠️ Không gửi được file giao hàng: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
     def is_admin(telegram_id: int) -> bool:
         return telegram_id in settings.admin_ids
@@ -113,8 +182,17 @@ def build_dispatcher(settings: Settings, db: Database):
         balances = wallet.get_balances(user_id) if user_id else {}
         await message.answer(
             views.welcome(settings.shop_name, balances, lang),
-            reply_markup=build_reply_keyboard(menu_rows(lang), placeholder=t(lang, "input_placeholder")),
+            reply_markup=main_inline_keyboard(lang),
             parse_mode="HTML",
+        )
+
+    async def edit_main_menu(callback: CallbackQuery, user_id: int | None = None) -> None:
+        lang = users.get_language(user_id) if user_id else "vi"
+        balances = wallet.get_balances(user_id) if user_id else {}
+        await edit_or_answer_callback(
+            callback,
+            views.welcome(settings.shop_name, balances, lang),
+            reply_markup=main_inline_keyboard(lang),
         )
 
     async def send_categories(message: Message) -> None:
@@ -282,18 +360,49 @@ def build_dispatcher(settings: Settings, db: Database):
         except Exception as exc:
             await message.answer(f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
+    @router.message(Command("taidon", "download_order", "export_order"))
+    async def download_order_command(message: Message):
+        user_id = ensure_user_from_message(message)
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await message.answer(
+                "📎 Nhập mã đơn muốn tải file theo mẫu:\n"
+                "<code>/taidon ORD1234ABCD</code>",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            order = orders.get_order_by_public_code(parts[1].strip(), expected_user_id=user_id)
+            if order["status"] not in {"delivered", "refunded"}:
+                await message.answer("❌ Đơn này chưa được giao hàng nên chưa có file để tải.")
+                return
+            delivery_rows = orders.delivery_for_order(int(order["id"]), expected_user_id=user_id)
+            if not delivery_rows:
+                await message.answer("❌ Không tìm thấy dữ liệu giao hàng cho đơn này. Hãy liên hệ admin.")
+                return
+            try:
+                from aiogram.types import BufferedInputFile
+                data = views.delivery_file_text(order, delivery_rows).encode("utf-8")
+                doc = BufferedInputFile(data, filename=views.delivery_filename(order))
+                await message.answer_document(doc, caption=f"📎 File giao hàng đơn {views.h(order['public_code'])}", parse_mode="HTML")
+            except Exception as exc:
+                await message.answer(f"❌ Không gửi được file: <code>{views.h(exc)}</code>", parse_mode="HTML")
+        except Exception as exc:
+            await message.answer(f"❌ Không tải được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
+
     @router.message(F.text.regexp(r"^\d{1,6}$"))
     async def custom_quantity_number(message: Message):
         user_id = ensure_user_from_message(message)
         telegram_id = int(message.from_user.id)
-        product_id = pending_quantity_product_by_tg.pop(telegram_id, None)
-        if product_id is None:
+        pending = pending_quantity_product_by_tg.pop(telegram_id, None)
+        if pending is None:
             if telegram_id in pending_search_by_tg:
                 pending_search_by_tg.discard(telegram_id)
                 await send_search_results(message, (message.text or "").strip())
             return
+        product_id, chat_id, message_id = pending
         try:
-            await create_order_and_show_payment(message, user_id, product_id, int(message.text or "0"))
+            await create_order_and_edit_by_id(message, user_id, int(product_id), int(message.text or "0"), int(chat_id), int(message_id))
         except Exception as exc:
             await message.answer(f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
@@ -484,14 +593,14 @@ def build_dispatcher(settings: Settings, db: Database):
     @router.callback_query(F.data == "menu:main")
     async def cb_main(callback: CallbackQuery):
         user_id = ensure_user_from_callback(callback)
-        await send_main_menu(callback.message, user_id)
+        await edit_main_menu(callback, user_id)
         await callback.answer()
 
     @router.callback_query(F.data == "buy:categories")
     async def cb_categories(callback: CallbackQuery):
         ensure_user_from_callback(callback)
         cats = catalog.list_categories()
-        await callback.message.answer(views.category_list(cats), reply_markup=categories_keyboard(cats), parse_mode="HTML")
+        await edit_or_answer_callback(callback, views.category_list(cats), reply_markup=categories_keyboard(cats))
         await callback.answer()
 
     @router.callback_query(F.data.startswith("cat:"))
@@ -499,10 +608,10 @@ def build_dispatcher(settings: Settings, db: Database):
         ensure_user_from_callback(callback)
         category_id = int(callback.data.split(":", 1)[1])
         products = catalog.list_products(category_id)
-        await callback.message.answer(
+        await edit_or_answer_callback(
+            callback,
             views.product_list(products, get_category_name(category_id)),
             reply_markup=products_keyboard(products, category_id),
-            parse_mode="HTML",
         )
         await callback.answer()
 
@@ -512,42 +621,94 @@ def build_dispatcher(settings: Settings, db: Database):
         product_id = int(callback.data.split(":", 1)[1])
         product = get_product(product_id)
         if not product:
-            await callback.message.answer("❌ Sản phẩm không tồn tại hoặc đã tắt bán.")
+            await edit_or_answer_callback(callback, "❌ Sản phẩm không tồn tại hoặc đã tắt bán.")
         else:
-            await callback.message.answer(
+            await edit_or_answer_callback(
+                callback,
                 views.product_detail(product),
                 reply_markup=product_detail_keyboard(product_id, int(product.get("available_stock") or 0)),
-                parse_mode="HTML",
             )
         await callback.answer()
+
+    async def create_order_and_edit_callback(callback: CallbackQuery, user_id: int, product_id: int, quantity: int) -> None:
+        if quantity <= 0:
+            await edit_or_answer_callback(callback, "❌ Số lượng phải lớn hơn 0.")
+            return
+        product = get_product(product_id)
+        if not product:
+            await edit_or_answer_callback(callback, "❌ Sản phẩm không tồn tại hoặc đã tắt bán.")
+            return
+        available = int(product.get("available_stock") or 0)
+        if quantity > available:
+            await edit_or_answer_callback(
+                callback,
+                f"❌ Không đủ hàng. Sản phẩm hiện chỉ còn <b>{available}</b>, bạn đang muốn mua <b>{quantity}</b>.",
+                reply_markup=product_detail_keyboard(product_id, available),
+            )
+            return
+        try:
+            order = orders.create_order(user_id=user_id, product_id=product_id, quantity=quantity)
+            balances = wallet.get_balances(user_id)
+            await edit_or_answer_callback(callback, views.order_created(order, balances), reply_markup=order_payment_keyboard(order["id"]))
+        except OutOfStock:
+            await edit_or_answer_callback(callback, "❌ Sản phẩm vừa hết hàng. Vui lòng chọn sản phẩm khác.")
+        except Exception as exc:
+            await edit_or_answer_callback(callback, f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>")
+
+    async def create_order_and_edit_by_id(message: Message, user_id: int, product_id: int, quantity: int, chat_id: int, message_id: int) -> None:
+        if quantity <= 0:
+            await edit_or_answer_by_id(message, chat_id, message_id, "❌ Số lượng phải lớn hơn 0.")
+            return
+        product = get_product(product_id)
+        if not product:
+            await edit_or_answer_by_id(message, chat_id, message_id, "❌ Sản phẩm không tồn tại hoặc đã tắt bán.")
+            return
+        available = int(product.get("available_stock") or 0)
+        if quantity > available:
+            await edit_or_answer_by_id(
+                message,
+                chat_id,
+                message_id,
+                f"❌ Không đủ hàng. Sản phẩm hiện chỉ còn <b>{available}</b>, bạn đang muốn mua <b>{quantity}</b>.",
+                reply_markup=product_detail_keyboard(product_id, available),
+            )
+            return
+        try:
+            order = orders.create_order(user_id=user_id, product_id=product_id, quantity=quantity)
+            balances = wallet.get_balances(user_id)
+            await edit_or_answer_by_id(message, chat_id, message_id, views.order_created(order, balances), reply_markup=order_payment_keyboard(order["id"]))
+        except OutOfStock:
+            await edit_or_answer_by_id(message, chat_id, message_id, "❌ Sản phẩm vừa hết hàng. Vui lòng chọn sản phẩm khác.")
+        except Exception as exc:
+            await edit_or_answer_by_id(message, chat_id, message_id, f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>")
 
     @router.callback_query(F.data.startswith("buyprod:"))
     async def cb_buy_product(callback: CallbackQuery):
         user_id = ensure_user_from_callback(callback)
         product_id = int(callback.data.split(":", 1)[1])
-        await create_order_and_show_payment(callback.message, user_id, product_id, 1)
+        await create_order_and_edit_callback(callback, user_id, product_id, 1)
         await callback.answer()
 
     @router.callback_query(F.data.startswith("buyqty:"))
     async def cb_buy_quantity(callback: CallbackQuery):
         user_id = ensure_user_from_callback(callback)
         _, product_id_s, quantity_s = callback.data.split(":", 2)
-        await create_order_and_show_payment(callback.message, user_id, int(product_id_s), int(quantity_s))
+        await create_order_and_edit_callback(callback, user_id, int(product_id_s), int(quantity_s))
         await callback.answer()
 
     @router.callback_query(F.data.startswith("buycustom:"))
     async def cb_buy_custom_quantity(callback: CallbackQuery):
         ensure_user_from_callback(callback)
         product_id = int(callback.data.split(":", 1)[1])
-        pending_quantity_product_by_tg[int(callback.from_user.id)] = product_id
+        pending_quantity_product_by_tg[int(callback.from_user.id)] = (product_id, int(callback.message.chat.id), int(callback.message.message_id))
         product = get_product(product_id)
         available = int((product or {}).get("available_stock") or 0)
-        await callback.message.answer(
+        await edit_or_answer_callback(
+            callback,
             f"✍️ Nhập số lượng muốn mua cho <b>{views.h((product or {}).get('name') or product_id)}</b>.\n"
             f"Tồn kho hiện tại: <b>{available}</b>.\n\n"
             f"Bạn có thể nhắn một số, ví dụ: <code>3</code>\n"
             f"Hoặc dùng lệnh: <code>/mua {product_id} 3</code>",
-            parse_mode="HTML",
         )
         await callback.answer()
 
@@ -557,11 +718,11 @@ def build_dispatcher(settings: Settings, db: Database):
         order_id = int(callback.data.split(":", 1)[1])
         try:
             result = orders.pay_with_wallet(order_id, expected_user_id=user_id)
-            await callback.message.answer(views.delivery(result["order"], result["delivery"]), parse_mode="HTML")
+            await edit_delivery_payload(callback, result["order"], result["delivery"])
         except InsufficientFunds:
-            await callback.message.answer("❌ Số dư ví không đủ. Hãy vào 💰 Ví để nạp thêm hoặc chọn chuyển khoản ngân hàng.")
+            await edit_or_answer_callback(callback, "❌ Số dư ví không đủ. Hãy bấm ➕ Nạp ví hoặc chọn chuyển khoản ngân hàng.", reply_markup=order_payment_keyboard(order_id))
         except (OrderStateError, OrderOwnershipError) as exc:
-            await callback.message.answer(f"❌ Không thanh toán được: <code>{views.h(exc)}</code>", parse_mode="HTML")
+            await edit_or_answer_callback(callback, f"❌ Không thanh toán được: <code>{views.h(exc)}</code>")
         await callback.answer()
 
     @router.callback_query(F.data.startswith("paybank:"))
@@ -571,12 +732,9 @@ def build_dispatcher(settings: Settings, db: Database):
         try:
             intent = payments.create_order_payment_intent(order_id=order_id, provider="bank", expected_user_id=user_id)
             extra, _qr = payment_extra_for_bank(intent)
-            await callback.message.answer(
-                views.payment_instruction(intent, provider_label="ngân hàng", extra=extra),
-                parse_mode="HTML",
-            )
+            await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="ngân hàng", extra=extra))
         except Exception as exc:
-            await callback.message.answer(f"❌ Không tạo được thanh toán: <code>{views.h(exc)}</code>", parse_mode="HTML")
+            await edit_or_answer_callback(callback, f"❌ Không tạo được thanh toán: <code>{views.h(exc)}</code>")
         await callback.answer()
 
     @router.callback_query(F.data.startswith("paybinance:"))
@@ -616,12 +774,9 @@ def build_dispatcher(settings: Settings, db: Database):
                     + (f"Link/QR thanh toán: {views.h(pay_link)}\n" if pay_link else "")
                     + "Khi webhook hoặc admin xác nhận giao dịch, bot sẽ tự giao hàng/cộng ví."
                 )
-            await callback.message.answer(
-                views.payment_instruction(intent, provider_label="Binance Pay/USDT", extra=extra),
-                parse_mode="HTML",
-            )
+            await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="Binance Pay/USDT", extra=extra))
         except Exception as exc:
-            await callback.message.answer(f"❌ Không tạo được thanh toán: <code>{views.h(exc)}</code>", parse_mode="HTML")
+            await edit_or_answer_callback(callback, f"❌ Không tạo được thanh toán: <code>{views.h(exc)}</code>")
         await callback.answer()
 
     @router.callback_query(F.data.startswith("cancel:"))
@@ -630,25 +785,25 @@ def build_dispatcher(settings: Settings, db: Database):
         order_id = int(callback.data.split(":", 1)[1])
         try:
             orders.cancel_order(order_id, "user_cancel", expected_user_id=user_id)
-            await callback.message.answer("✅ Đã hủy đơn và trả hàng giữ tạm về kho.")
+            await edit_or_answer_callback(callback, "✅ Đã hủy đơn và trả hàng giữ tạm về kho.", reply_markup=main_inline_keyboard(users.get_language(user_id)))
         except OrderOwnershipError:
-            await callback.message.answer("❌ Bạn không có quyền hủy đơn này.")
+            await edit_or_answer_callback(callback, "❌ Bạn không có quyền hủy đơn này.")
         await callback.answer()
 
     @router.callback_query(F.data == "wallet:open")
     async def cb_wallet_open(callback: CallbackQuery):
         user_id = ensure_user_from_callback(callback)
-        await send_wallet(callback.message, user_id)
+        await edit_or_answer_callback(callback, views.wallet(wallet.get_balances(user_id)), reply_markup=wallet_keyboard())
         await callback.answer()
 
     @router.callback_query(F.data == "topupcustom")
     async def cb_topup_custom(callback: CallbackQuery):
         ensure_user_from_callback(callback)
-        await callback.message.answer(
+        await edit_or_answer_callback(
+            callback,
             "✍️ Bạn muốn nạp bao nhiêu?\n\n"
             "Gửi lệnh theo mẫu: <code>/nap 150000</code>\n"
             "Có thể nhập số tiền tự do, không bị giới hạn bởi các mức có sẵn.",
-            parse_mode="HTML",
         )
         await callback.answer()
 
@@ -657,15 +812,43 @@ def build_dispatcher(settings: Settings, db: Database):
         user_id = ensure_user_from_callback(callback)
         amount_minor = int(callback.data.split(":", 1)[1])
         try:
-            await send_topup_intent(callback.message, user_id, amount_minor)
+            intent = payments.create_wallet_topup_intent(user_id=user_id, provider="bank", currency="VND", amount_minor=amount_minor)
+            extra, _qr = payment_extra_for_bank(intent)
+            await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="ngân hàng", extra=extra))
         except Exception as exc:
-            await callback.message.answer(f"❌ Không tạo được lệnh nạp: <code>{views.h(exc)}</code>", parse_mode="HTML")
+            await edit_or_answer_callback(callback, f"❌ Không tạo được lệnh nạp: <code>{views.h(exc)}</code>")
         await callback.answer()
 
     @router.callback_query(F.data == "history")
     async def cb_history(callback: CallbackQuery):
         user_id = ensure_user_from_callback(callback)
-        await callback.message.answer(views.history(orders.order_history(user_id)), parse_mode="HTML")
+        await edit_or_answer_callback(callback, views.history(orders.order_history(user_id)))
+        await callback.answer()
+
+    @router.callback_query(F.data == "nav:profile")
+    async def cb_profile(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        prof = users.get_profile(callback.from_user.id)
+        await edit_or_answer_callback(callback, views.profile(prof or {}, callback.from_user.id, callback.from_user.username), reply_markup=wallet_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data == "search:menu")
+    async def cb_search_menu(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        pending_search_by_tg.add(int(callback.from_user.id))
+        await edit_or_answer_callback(callback, views.search_prompt())
+        await callback.answer()
+
+    @router.callback_query(F.data == "support:main")
+    async def cb_support_main(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        await edit_or_answer_callback(callback, views.support(settings.support_contact), reply_markup=support_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data == "lang:menu")
+    async def cb_lang_menu(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        await edit_or_answer_callback(callback, views.language(), reply_markup=language_keyboard())
         await callback.answer()
 
     @router.callback_query(F.data.startswith("lang:"))
@@ -674,20 +857,19 @@ def build_dispatcher(settings: Settings, db: Database):
         lang = callback.data.split(":", 1)[1]
         try:
             users.set_language(user_id, lang)
-            await callback.message.answer(t(lang, "language_updated").format(language=language_display(lang)), parse_mode="HTML")
-            await send_main_menu(callback.message, user_id)
+            await edit_or_answer_callback(callback, t(lang, "language_updated").format(language=language_display(lang)), reply_markup=main_inline_keyboard(lang))
         except Exception as exc:
-            await callback.message.answer(f"❌ Không đổi được ngôn ngữ: <code>{views.h(exc)}</code>", parse_mode="HTML")
+            await edit_or_answer_callback(callback, f"❌ Không đổi được ngôn ngữ: <code>{views.h(exc)}</code>")
         await callback.answer()
 
     @router.callback_query(F.data.startswith("support:"))
     async def cb_support(callback: CallbackQuery):
         ensure_user_from_callback(callback)
         topic = callback.data.split(":", 1)[1]
-        await callback.message.answer(
+        await edit_or_answer_callback(
+            callback,
             f"💬 Bạn đã chọn hỗ trợ: <b>{views.h(topic)}</b>\n\n"
             "Hãy gửi tin nhắn kèm mã đơn. Admin sẽ kiểm tra và phản hồi.",
-            parse_mode="HTML",
         )
         await callback.answer()
 

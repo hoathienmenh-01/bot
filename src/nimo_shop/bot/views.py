@@ -139,17 +139,69 @@ def history(orders: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+DELIVERY_INLINE_LIMIT = 20
+DELIVERY_TEXT_LIMIT = 3300
+
+
+def delivery_file_text(order: dict, delivery_rows: Iterable[dict]) -> str:
+    rows = list(delivery_rows)
+    lines = [
+        f"Don hang: {order['public_code']}",
+        f"San pham: {order['product_name']}",
+        f"So luong: {len(rows)}",
+        f"Tong tien: {fmt_money(int(order['total_amount_minor']), order['currency'])}",
+        "",
+        "===== THONG TIN HANG =====",
+    ]
+    for idx, row in enumerate(rows, start=1):
+        lines.append(f"{idx}. {row['delivered_content']}")
+    lines.append("")
+    lines.append("Vui long luu file nay. Neu hang loi, gui ma don cho admin de duoc ho tro.")
+    return "\n".join(lines)
+
+
+def delivery_filename(order: dict) -> str:
+    code = str(order.get("public_code") or "order").replace("/", "_").replace("\\", "_")
+    return f"{code}_delivery.txt"
+
+
+def delivery_needs_file(order: dict, delivery_rows: Iterable[dict]) -> bool:
+    rows = list(delivery_rows)
+    if len(rows) > DELIVERY_INLINE_LIMIT:
+        return True
+    return len(delivery(order, rows)) > DELIVERY_TEXT_LIMIT
+
+
+def delivery_file_summary(order: dict, delivery_rows: Iterable[dict]) -> str:
+    rows = list(delivery_rows)
+    return (
+        f"✅ <b>Đã giao hàng cho đơn {h(order['public_code'])}</b>\n\n"
+        f"Sản phẩm: <b>{h(order['product_name'])}</b>\n"
+        f"Số lượng: <b>{len(rows)}</b>\n"
+        f"Tổng tiền: <b>{fmt_money(int(order['total_amount_minor']), order['currency'])}</b>\n\n"
+        "📎 Đơn này có nhiều dòng hàng nên bot đã gửi file TXT để bạn tải xuống và lưu lại. "
+        "Nếu hàng lỗi, gửi mã đơn cho admin để được hỗ trợ."
+    )
+
+
 def delivery(order: dict, delivery_rows: Iterable[dict]) -> str:
+    rows = list(delivery_rows)
+    if len(rows) > DELIVERY_INLINE_LIMIT:
+        return delivery_file_summary(order, rows)
     lines = [
         f"✅ <b>Đã giao hàng cho đơn {h(order['public_code'])}</b>",
         f"Sản phẩm: <b>{h(order['product_name'])}</b>",
+        f"Số lượng: <b>{len(rows)}</b>",
         "",
         "🔐 <b>Thông tin hàng</b>",
     ]
-    for idx, row in enumerate(delivery_rows, start=1):
+    for idx, row in enumerate(rows, start=1):
         lines.append(f"{idx}. <code>{h(row['delivered_content'])}</code>")
     lines.append("\nVui lòng lưu lại thông tin. Nếu hàng lỗi, vào 💬 Hỗ trợ để liên hệ admin.")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if len(text) > DELIVERY_TEXT_LIMIT:
+        return delivery_file_summary(order, rows)
+    return text
 
 
 def support(admin_contact: str | None = None) -> str:

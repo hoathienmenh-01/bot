@@ -7,7 +7,7 @@ from pathlib import Path
 from nimo_shop.bot.admin_commands import parse_add_product, parse_add_stock, parse_confirm, parse_one_int_arg
 from nimo_shop.bot import views
 from nimo_shop.bot.i18n import SUPPORTED_LANGUAGES, menu_rows, menu_texts
-from nimo_shop.bot.keyboards import language_keyboard_rows, product_detail_keyboard_rows, wallet_keyboard_rows
+from nimo_shop.bot.keyboards import language_keyboard_rows, main_inline_keyboard_rows, product_detail_keyboard_rows, wallet_keyboard_rows
 from nimo_shop.db import Database
 from nimo_shop.services.catalog import CatalogService
 from nimo_shop.services.orders import OrderService
@@ -119,6 +119,27 @@ class BotCompletionTest(unittest.TestCase):
     def test_search_menu_label_is_available(self) -> None:
         self.assertIn("🔎 Tìm sản phẩm", menu_texts("search"))
         self.assertTrue(any("Search" in item for row in menu_rows("en") for item in row))
+
+
+    def test_large_delivery_is_exported_as_downloadable_text_file(self) -> None:
+        bulk_items = [f"bulk-{i}|secret" for i in range(1, 31)]
+        self.catalog.add_stock(self.product_id, bulk_items)
+        order = self.orders.create_order(user_id=self.user_id, product_id=self.product_id, quantity=25)
+        WalletService(self.db).credit(self.user_id, "VND", 150_000 * 25, reason="bulk", idempotency_key="bulk-credit")
+        paid = self.orders.pay_with_wallet(order["id"])
+        self.assertEqual(len(paid["delivery"]), 25)
+        self.assertTrue(views.delivery_needs_file(paid["order"], paid["delivery"]))
+        summary = views.delivery(paid["order"], paid["delivery"])
+        self.assertIn("đã gửi file TXT", summary)
+        file_text = views.delivery_file_text(paid["order"], paid["delivery"])
+        self.assertIn(paid["order"]["public_code"], file_text)
+        self.assertIn("bulk-1|secret", file_text)
+        self.assertTrue(views.delivery_filename(paid["order"]).endswith("_delivery.txt"))
+
+    def test_main_inline_keyboard_supports_single_message_navigation(self) -> None:
+        markup = str(main_inline_keyboard_rows("vi"))
+        for callback_name in ["buy:categories", "search:menu", "wallet:open", "lang:menu"]:
+            self.assertIn(callback_name, markup)
 
     def test_sepay_normalizer_accepts_common_field_names(self) -> None:
         row = normalize_sepay_transaction({

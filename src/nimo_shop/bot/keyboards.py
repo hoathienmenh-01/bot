@@ -39,6 +39,21 @@ def build_inline_keyboard(rows: list[list[tuple[str, str]]]):
     )
 
 
+def main_inline_keyboard_rows(lang: str = "vi") -> list[list[tuple[str, str]]]:
+    from nimo_shop.bot.i18n import t
+
+    return [
+        [(t(lang, "buy"), "buy:categories"), (t(lang, "search"), "search:menu")],
+        [(t(lang, "profile"), "nav:profile"), (t(lang, "history"), "history")],
+        [(t(lang, "wallet"), "wallet:open"), (t(lang, "support"), "support:main")],
+        [(t(lang, "language"), "lang:menu")],
+    ]
+
+
+def main_inline_keyboard(lang: str = "vi"):
+    return build_inline_keyboard(main_inline_keyboard_rows(lang))
+
+
 def categories_keyboard(categories: list[dict]):
     rows = [[(f"📁 {cat['name']}", f"cat:{cat['id']}")] for cat in categories]
     rows.append([("⬅️ Menu chính", "menu:main")])

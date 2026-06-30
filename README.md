@@ -374,3 +374,23 @@ CLI backup:
 ```bash
 PYTHONPATH=src python -m nimo_shop.run_all --host 0.0.0.0 --port 8080
 ```
+
+## v1.9 notes: large orders and cleaner Telegram chat
+
+### Single-panel navigation
+Most inline button actions now edit the same Telegram bot message instead of posting a new bot message. This keeps the customer chat short and easier to navigate.
+
+### Large order delivery by file
+For high-quantity orders, the bot sends a TXT file containing all delivered keys/accounts instead of placing every line into the chat. Customers can also download a delivered order again:
+
+```text
+/taidon ORD1234ABCD
+/download_order ORD1234ABCD
+/export_order ORD1234ABCD
+```
+
+### Run bot + web together
+
+```bash
+PYTHONPATH=src python -m nimo_shop.run_all --host 0.0.0.0 --port 8080
+```

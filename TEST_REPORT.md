@@ -1,4 +1,4 @@
-# TEST REPORT - v1.8.0
+# TEST REPORT - v1.9.0
 
 Commands run:
 
@@ -9,7 +9,7 @@ Commands run:
 Result:
 
 ```text
-Ran 49 tests in 1.959s
+Ran 51 tests in 1.929s
 OK
 Seeded demo categories/products/stock.
 AUDIT OK: no consistency issues found
@@ -27,3 +27,7 @@ Covered areas:
 - Backup ZIP download and SQLite database backup.
 - First-run setup path.
 - Run-all entrypoint.
+- Quantity-aware purchase flow.
+- Single-message inline callback navigation.
+- Large order delivery export as TXT.
+- Re-download delivered order file by order code.
