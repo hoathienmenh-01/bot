@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS users (
     full_name TEXT,
     language TEXT NOT NULL DEFAULT 'vi',
     is_banned INTEGER NOT NULL DEFAULT 0,
+    api_key TEXT UNIQUE,
+    api_key_created_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS wallet_balances (
@@ -42,6 +44,7 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
 CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
+    category_icon TEXT NOT NULL DEFAULT '📁',
     sort_order INTEGER NOT NULL DEFAULT 100,
     is_active INTEGER NOT NULL DEFAULT 1
 );
@@ -80,8 +83,7 @@ CREATE TABLE IF NOT EXISTS stock_items (
     sold_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
-    FOREIGN KEY(reserved_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
-    UNIQUE(product_id, content)
+    FOREIGN KEY(reserved_by_user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_stock_available ON stock_items(product_id, status);
 CREATE TABLE IF NOT EXISTS orders (
@@ -114,6 +116,29 @@ CREATE TABLE IF NOT EXISTS deliveries (
     FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE,
     FOREIGN KEY(stock_item_id) REFERENCES stock_items(id)
 );
+
+CREATE TABLE IF NOT EXISTS preorders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_code TEXT NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    product_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL CHECK(quantity > 0),
+    currency TEXT NOT NULL,
+    unit_amount_minor INTEGER NOT NULL CHECK(unit_amount_minor >= 0),
+    total_amount_minor INTEGER NOT NULL CHECK(total_amount_minor >= 0),
+    deposit_percent INTEGER NOT NULL DEFAULT 10 CHECK(deposit_percent >= 0 AND deposit_percent <= 100),
+    deposit_amount_minor INTEGER NOT NULL DEFAULT 0 CHECK(deposit_amount_minor >= 0),
+    status TEXT NOT NULL DEFAULT 'awaiting_deposit' CHECK(status IN ('awaiting_deposit','active','fulfilled','cancelled','refunded')),
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    paid_at TEXT,
+    fulfilled_at TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id),
+    FOREIGN KEY(product_id) REFERENCES products(id)
+);
+CREATE INDEX IF NOT EXISTS idx_preorders_user_status ON preorders(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_preorders_product_status ON preorders(product_id, status);
+
 CREATE TABLE IF NOT EXISTS payment_intents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     public_code TEXT NOT NULL UNIQUE,
@@ -234,6 +259,52 @@ class Database:
         # Lightweight migrations for existing SQLite databases. CREATE TABLE
         # does not add new columns to an already-created table, so add only
         # the missing columns needed by newer web-admin versions.
+        user_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(users)")}
+        if "api_key" not in user_cols:
+            # SQLite cannot add a UNIQUE column with ALTER TABLE on an existing
+            # database. Add it as a plain nullable column, then enforce
+            # uniqueness with a partial unique index below.
+            conn.execute("ALTER TABLE users ADD COLUMN api_key TEXT")
+        if "api_key_created_at" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN api_key_created_at TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_api_key_unique ON users(api_key) WHERE api_key IS NOT NULL")
+
+        category_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(categories)")}
+        if "category_icon" not in category_cols:
+            conn.execute("ALTER TABLE categories ADD COLUMN category_icon TEXT NOT NULL DEFAULT '📁'")
+
+        # v2.6 allows optional duplicate inventory rows. Older databases had a
+        # UNIQUE(product_id, content) table constraint, which cannot be dropped
+        # with ALTER TABLE, so recreate the table once while preserving IDs and
+        # delivery references.
+        stock_sql_row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='stock_items'").fetchone()
+        stock_sql = str(stock_sql_row[0] if stock_sql_row else "")
+        if "UNIQUE(product_id, content)" in stock_sql:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS stock_items_v26 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('available','reserved','sold')) DEFAULT 'available',
+                    reserved_by_user_id INTEGER,
+                    reserved_order_id INTEGER,
+                    reserved_until TEXT,
+                    sold_order_id INTEGER,
+                    sold_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
+                    FOREIGN KEY(reserved_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+                )
+            """)
+            conn.execute("""
+                INSERT INTO stock_items_v26(id, product_id, content, status, reserved_by_user_id, reserved_order_id, reserved_until, sold_order_id, sold_at, created_at)
+                SELECT id, product_id, content, status, reserved_by_user_id, reserved_order_id, reserved_until, sold_order_id, sold_at, created_at FROM stock_items
+            """)
+            conn.execute("DROP TABLE stock_items")
+            conn.execute("ALTER TABLE stock_items_v26 RENAME TO stock_items")
+            conn.execute("PRAGMA foreign_keys=ON")
+
         product_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(products)")}
         migrations = {
             "stock_format": "ALTER TABLE products ADD COLUMN stock_format TEXT NOT NULL DEFAULT 'auto'",

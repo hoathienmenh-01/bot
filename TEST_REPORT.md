@@ -1,5 +1,31 @@
 # TEST REPORT
 
+## v2.6.1 Test Report
+
+Command:
+
+```bash
+python -m compileall -q src tests
+./scripts/run_full_tests.sh
+```
+
+Result:
+
+```text
+Ran 69 tests in 4.579s
+
+OK
+Seeded demo categories/products/stock.
+AUDIT OK: no consistency issues found
+FULL TEST OK
+```
+
+New v2.6.1 coverage:
+
+- Regression test for upgrading an existing SQLite `users` table without `api_key`.
+- Verifies the migration no longer uses unsupported `ALTER TABLE ... ADD COLUMN ... UNIQUE`.
+- Verifies API keys remain unique through `idx_users_api_key_unique`.
+
 Command:
 
 ```bash
@@ -83,3 +109,63 @@ New coverage:
 - Bot product list renders icon, price and stock.
 - Bot product detail renders custom emoji tag, short description and long description.
 - Product with image and product without image both remain compatible with single-panel navigation.
+
+
+## v2.5.0 Test Report
+
+Command:
+
+```bash
+python -m compileall -q src tests
+./scripts/run_full_tests.sh
+```
+
+Result:
+
+```text
+Ran 65 tests in 4.233s
+
+OK
+Seeded demo categories/products/stock.
+AUDIT OK: no consistency issues found
+FULL TEST OK
+```
+
+New coverage:
+
+- Category list renders green/red stock status and category icons.
+- Out-of-stock products expose preorder buttons instead of purchase buttons.
+- Preorder creation computes deposit by configured percentage.
+- Preorder wallet payment debits once and marks preorder active.
+- Preorder owner guard prevents another user from viewing/paying.
+- Web Admin can edit category icons, write preorder deposit percent to `.env`, list preorders and mark them fulfilled.
+
+
+## v2.6.0 Test Report
+
+Command:
+
+```bash
+python -m compileall -q src tests
+./scripts/run_full_tests.sh
+```
+
+Result:
+
+```text
+Ran 68 tests in 4.715s
+
+OK
+Seeded demo categories/products/stock.
+AUDIT OK: no consistency issues found
+FULL TEST OK
+```
+
+New coverage:
+
+- Telegram category grid rows include 3-column layout and refresh callback.
+- API link view exposes buyer API docs and regenerate-key callback.
+- Buyer API rejects invalid keys.
+- Buyer API lists products with stock.
+- Buyer API purchases products using wallet balance and returns delivery JSON.
+- Duplicate stock import policy supports allow, skip and reject modes.

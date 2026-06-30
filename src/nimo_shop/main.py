@@ -72,6 +72,22 @@ async def sepay_poll_loop(settings: Settings, payments: PaymentService) -> None:
         await asyncio.sleep(max(10, int(settings.sepay_poll_seconds)))
 
 
+
+async def set_default_bot_commands(bot) -> None:
+    """Publish the command menu shown by Telegram in the bottom-left Menu button."""
+    try:
+        from aiogram.types import BotCommand
+        await bot.set_my_commands([
+            BotCommand(command="start", description="Bắt đầu và xem sản phẩm"),
+            BotCommand(command="menu", description="Open the main menu"),
+            BotCommand(command="products", description="Show products"),
+            BotCommand(command="wallet", description="Open wallet"),
+            BotCommand(command="search", description="Search products"),
+            BotCommand(command="taidon", description="Download delivered order"),
+        ])
+    except Exception as exc:  # pragma: no cover - Telegram runtime only
+        print(f"[bot] cannot set command menu: {exc}")
+
 def run_setup_web(settings: Settings, *, reason: str) -> None:
     """Run web admin setup when the bot cannot start yet."""
     from nimo_shop.web.app import create_server
@@ -144,6 +160,7 @@ async def amain(*, setup_web_on_invalid_token: bool = True) -> None:
             print("NIMO Telegram bot chưa chạy: BOT_TOKEN không hợp lệ theo định dạng BotFather. Web Admin vẫn đang chạy.")
         return
 
+    await set_default_bot_commands(bot)
     dp = build_dispatcher(settings, db)
     background_tasks = []
     if settings.bank_enabled and settings.sepay_api_key:

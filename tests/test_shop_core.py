@@ -62,15 +62,15 @@ class ShopCoreTest(unittest.TestCase):
         self.assertEqual(summary["available"], 0)
         self.assertEqual(summary["reserved"], 2)
 
-    def test_duplicate_stock_import_is_rejected_instead_of_silently_skipped(self) -> None:
-        with self.assertRaises(ValueError):
-            self.catalog.add_stock(self.product_id, ["acc2|pass2", "acc3|pass3"])
-        with self.assertRaises(ValueError):
-            self.catalog.add_stock(self.product_id, ["acc4|pass4", "acc4|pass4"])
+    def test_duplicate_stock_import_policy_can_allow_or_reject(self) -> None:
+        inserted = self.catalog.add_stock(self.product_id, ["acc2|pass2", "acc4|pass4", "acc4|pass4"], duplicate_policy="allow")
+        self.assertEqual(inserted, 3)
         row = self._one("SELECT COUNT(*) AS c FROM stock_items WHERE product_id=?", (self.product_id,))
-        self.assertEqual(row["c"], 2)
-        inserted = self.catalog.add_stock(self.product_id, ["acc3|pass3"])
-        self.assertEqual(inserted, 1)
+        self.assertEqual(row["c"], 5)
+        with self.assertRaises(ValueError):
+            self.catalog.add_stock(self.product_id, ["acc2|pass2", "acc3|pass3"], duplicate_policy="reject")
+        skipped = self.catalog.add_stock(self.product_id, ["acc2|pass2", "acc5|pass5", "acc5|pass5"], duplicate_policy="skip")
+        self.assertEqual(skipped, 1)
 
     def test_wallet_credit_debit_are_idempotent(self) -> None:
         self.assertEqual(self.wallet.credit(self.user_id, "VND", 200_000, reason="manual", idempotency_key="credit-1"), 200_000)
@@ -432,3 +432,83 @@ class ShopCoreTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+from nimo_shop.services.preorders import PreorderOwnershipError, PreorderService
+
+class PreorderCoreTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.tmp.name) / "shop.db")
+        self.db.init()
+        self.users = UserService(self.db)
+        self.catalog = CatalogService(self.db)
+        self.wallet = WalletService(self.db)
+        self.preorders = PreorderService(self.db, deposit_percent=10)
+        self.user_id = self.users.get_or_create(111, "buyer", "Buyer")
+        self.other_user_id = self.users.get_or_create(222, "other", "Other")
+        cat_id = self.catalog.add_category("ChatGPT", category_icon="🤖")
+        self.product_id = self.catalog.add_product(
+            category_id=cat_id,
+            name="ChatGPT Plus",
+            description="",
+            currency="VND",
+            price_minor=100_000,
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_preorder_deposit_wallet_payment_and_owner_guard(self) -> None:
+        preorder = self.preorders.create_preorder(user_id=self.user_id, product_id=self.product_id, quantity=3)
+        self.assertEqual(preorder["status"], "awaiting_deposit")
+        self.assertEqual(preorder["total_amount_minor"], 300_000)
+        self.assertEqual(preorder["deposit_amount_minor"], 30_000)
+        with self.assertRaises(PreorderOwnershipError):
+            self.preorders.get_preorder(preorder["id"], expected_user_id=self.other_user_id)
+        self.wallet.credit(self.user_id, "VND", 30_000, reason="test", idempotency_key="pre-credit")
+        paid = self.preorders.pay_deposit_with_wallet(preorder["id"], expected_user_id=self.user_id)
+        self.assertEqual(paid["status"], "active")
+        self.assertEqual(self.wallet.get_balances(self.user_id)["VND"], 0)
+        self.assertEqual(len(self.preorders.list_preorders(status="active")), 1)
+
+
+class MigrationRegressionTest(unittest.TestCase):
+    def test_existing_users_table_can_gain_api_key_without_unique_column_alter(self) -> None:
+        # Regression for real upgraded DBs: SQLite rejects
+        # `ALTER TABLE users ADD COLUMN api_key TEXT UNIQUE`. The migration must
+        # add a plain nullable column and create a unique index instead.
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            db_path = Path(tmp.name) / "legacy.db"
+            import sqlite3
+
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id TEXT NOT NULL UNIQUE,
+                    username TEXT,
+                    full_name TEXT,
+                    language TEXT NOT NULL DEFAULT 'vi',
+                    is_banned INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute("INSERT INTO users(telegram_id, username, full_name) VALUES('111','buyer','Buyer')")
+            conn.commit()
+            conn.close()
+
+            db = Database(db_path)
+            db.init()
+
+            with db.connect() as migrated:
+                cols = {str(row[1]) for row in migrated.execute("PRAGMA table_info(users)")}
+                self.assertIn("api_key", cols)
+                self.assertIn("api_key_created_at", cols)
+                migrated.execute("INSERT INTO users(telegram_id, username, full_name, api_key) VALUES('222','a','A','tgb_same')")
+                with self.assertRaises(sqlite3.IntegrityError):
+                    migrated.execute("INSERT INTO users(telegram_id, username, full_name, api_key) VALUES('333','b','B','tgb_same')")
+        finally:
+            tmp.cleanup()

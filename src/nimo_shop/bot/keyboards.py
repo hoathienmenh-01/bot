@@ -44,9 +44,9 @@ def main_inline_keyboard_rows(lang: str = "vi") -> list[list[tuple[str, str]]]:
 
     return [
         [(t(lang, "buy"), "buy:categories"), (t(lang, "search"), "search:menu")],
+        [(t(lang, "wallet"), "wallet:open"), ("🔗 API", "api:open")],
         [(t(lang, "profile"), "nav:profile"), (t(lang, "history"), "history")],
-        [(t(lang, "wallet"), "wallet:open"), (t(lang, "support"), "support:main")],
-        [(t(lang, "language"), "lang:menu")],
+        [(t(lang, "support"), "support:main"), (t(lang, "language"), "lang:menu")],
     ]
 
 
@@ -54,22 +54,38 @@ def main_inline_keyboard(lang: str = "vi"):
     return build_inline_keyboard(main_inline_keyboard_rows(lang))
 
 
-def categories_keyboard(categories: list[dict]):
-    rows = [[(f"📁 {cat['name']}", f"cat:{cat['id']}")] for cat in categories]
+def categories_keyboard_rows(categories: list[dict]) -> list[list[tuple[str, str]]]:
+    buttons = []
+    for cat in categories:
+        stock = int(cat.get("available_stock") or 0)
+        status = "🟢" if stock > 0 else "🔴"
+        icon = str(cat.get("category_icon") or "📁").strip() or "📁"
+        buttons.append((f"{status} {icon} {cat['name']} [{stock}]", f"cat:{cat['id']}"))
+    rows = [buttons[idx:idx + 3] for idx in range(0, len(buttons), 3)]
+    rows.append([("🔄 Làm mới", "refresh:home")])
     rows.append([("⬅️ Menu chính", "menu:main")])
-    return build_inline_keyboard(rows)
+    return rows
+
+
+def categories_keyboard(categories: list[dict]):
+    return build_inline_keyboard(categories_keyboard_rows(categories))
 
 
 def _product_button_label(p: dict) -> str:
     from nimo_shop.money import fmt_money
     icon = str(p.get("product_icon") or "📦").strip() or "📦"
-    return f"{icon} {p['name']} | {fmt_money(int(p['price_minor']), p['currency'])} | 📦 {int(p.get('available_stock') or 0)}"
+    stock = int(p.get("available_stock") or 0)
+    status = "🟢" if stock > 0 else "🔴"
+    return f"{status} {icon} {p['name']} | {fmt_money(int(p['price_minor']), p['currency'])} | 📦 {stock}"
 
 
 def products_keyboard(products: list[dict], category_id: int | None = None):
     rows = [[(_product_button_label(p), f"prod:{p['id']}")] for p in products]
     if category_id is not None:
+        rows.append([("🔄 Làm mới", f"refresh:cat:{category_id}")])
         rows.append([("⬅️ Danh mục", "buy:categories")])
+    else:
+        rows.append([("🔄 Làm mới", "refresh:products")])
     rows.append([("⬅️ Menu chính", "menu:main")])
     return build_inline_keyboard(rows)
 
@@ -90,6 +106,9 @@ def product_detail_keyboard_rows(product_id: int, available_stock: int) -> list[
         if more:
             rows.append(more)
         rows.append([("✍️ Nhập số lượng khác", f"buycustom:{product_id}")])
+    else:
+        rows.append([("🧾 Đặt trước 1", f"preorderqty:{product_id}:1")])
+        rows.append([("✍️ Nhập số lượng đặt trước", f"preordercustom:{product_id}")])
     rows.append([("⬅️ Danh mục", "buy:categories"), ("🏠 Menu", "menu:main")])
     return rows
 
@@ -104,6 +123,14 @@ def order_payment_keyboard(order_id: int):
         [("➕ Nạp ví", "wallet:open"), ("🏦 Chuyển khoản ngân hàng", f"paybank:{order_id}")],
         [("🟡 Binance Pay/USDT", f"paybinance:{order_id}")],
         [("❌ Hủy đơn", f"cancel:{order_id}")],
+    ])
+
+
+def preorder_payment_keyboard(preorder_id: int):
+    return build_inline_keyboard([
+        [("💰 Thanh toán phí đặt trước bằng ví", f"prepaywallet:{preorder_id}")],
+        [("➕ Nạp ví", "wallet:open"), ("❌ Hủy đặt trước", f"precancel:{preorder_id}")],
+        [("🏠 Menu", "menu:main")],
     ])
 
 
@@ -149,3 +176,15 @@ def search_results_keyboard_rows(products: list[dict]) -> list[list[tuple[str, s
     rows = [[(_product_button_label(p), f"prod:{p['id']}")] for p in products[:20]]
     rows.append([("🛒 Xem danh mục", "buy:categories"), ("🏠 Menu", "menu:main")])
     return rows
+
+
+def api_link_keyboard_rows() -> list[list[tuple[str, str]]]:
+    return [
+        [("🔄 Tạo key mới", "api:regen")],
+        [("🛒 Danh sách sản phẩm", "buy:categories"), ("💰 Nạp ví", "wallet:open")],
+        [("🏠 Menu", "menu:main")],
+    ]
+
+
+def api_link_keyboard():
+    return build_inline_keyboard(api_link_keyboard_rows())

@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.6.0 - Telegram Menu / Buyer API / Catalog Grid / Duplicate Stock Policy
+
+- Bot startup now publishes Telegram command menu so the left-bottom **Menu** button shows `/start`, `/menu`, `/products`, `/wallet`, `/search`, and `/taidon`.
+- `/start` opens the shop catalog immediately with welcome text, wallet balance, grid category buttons, stock state, and `🔄 Làm mới`.
+- Category buttons are arranged in a 3-column grid; category and product buttons use `🟢/🔴` state markers.
+- Added buyer API key flow inside Telegram bot (`🔗 API` + regenerate key).
+- Added public buyer API endpoints:
+  - `GET /api/telegram-buyer/products`
+  - `POST /api/telegram-buyer/purchase`
+  - `/t/api-guide` documentation page.
+- Added `STOCK_DUPLICATE_POLICY=allow|skip|reject` and made `allow` the default for shops that intentionally import duplicate-looking rows.
+- Added migration to remove the old SQLite unique stock constraint while preserving existing stock IDs and delivery history.
+- Added regression tests for API key/docs, API product listing, API purchase with wallet, category grid, refresh callback rows and duplicate policy.
+
 ## v1.7.0 — Quantity / Wallet Visibility / Languages / One-command Run
 
 - Added quantity-aware Telegram purchase flow:
@@ -88,6 +102,20 @@
 - Delivery files can render labeled fields per product, e.g. Email / Password / 2FA.
 - Added SQLite migrations for existing databases to add product stock-format columns safely.
 - Added tests for product-specific stock formats and slash-delimited account imports.
+
+
+## v2.5.0 - Category stock folders and preorders
+
+- Added category icons and stock-aware category buttons. Categories now show green/available or red/out-of-stock state with total available stock count.
+- Product list buttons now show green/red stock status and keep the compact shop-style layout.
+- Out-of-stock product detail pages now show preorder buttons instead of normal buy buttons.
+- Added preorder database table and PreorderService with owner guard, deposit calculation and wallet deposit payment.
+- Added configurable `PREORDER_DEPOSIT_PERCENT` in Web Admin Settings and `.env.example`.
+- Added Web Admin Preorders page to review, cancel and mark preorder requests as fulfilled.
+- Added category icon editing in Web Admin category management.
+- Added bot views/keyboards for preorder create, custom quantity, wallet deposit payment and cancel.
+- Added regression tests for category stock states, preorder UI, preorder wallet payment, owner guard and Web Admin preorder management.
+- Full test suite: 65 tests passing, compileall OK, seed demo OK, audit OK.
 
 ## v2.4.0 - Product media cards / premium catalog UI
 

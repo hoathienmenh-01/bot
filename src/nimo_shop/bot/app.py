@@ -16,11 +16,13 @@ from nimo_shop.bot.keyboards import (
     language_keyboard,
     main_inline_keyboard,
     order_payment_keyboard,
+    preorder_payment_keyboard,
     product_detail_keyboard,
     products_keyboard,
     support_keyboard,
     search_results_keyboard,
     wallet_keyboard,
+    api_link_keyboard,
 )
 from nimo_shop.config import Settings
 from nimo_shop.db import Database
@@ -32,6 +34,7 @@ from nimo_shop.services.catalog import CatalogService
 from nimo_shop.services.finance import FinanceService
 from nimo_shop.services.orders import OrderOwnershipError, OrderService, OrderStateError, OutOfStock
 from nimo_shop.services.payments import PaymentMatchError, PaymentService
+from nimo_shop.services.preorders import PreorderOwnershipError, PreorderService, PreorderStateError
 from nimo_shop.services.users import UserService
 from nimo_shop.services.wallet import InsufficientFunds, WalletService
 
@@ -48,11 +51,13 @@ def build_dispatcher(settings: Settings, db: Database):
     users = UserService(db)
     catalog = CatalogService(db)
     orders = OrderService(db, order_expires_minutes=settings.order_expires_minutes)
+    preorders = PreorderService(db, deposit_percent=settings.preorder_deposit_percent)
     wallet = WalletService(db)
     payments = PaymentService(db, deposit_expires_minutes=settings.deposit_expires_minutes)
     finance = FinanceService(db)
     audit = AuditService(db)
     pending_quantity_product_by_tg: dict[int, tuple[int, int, int]] = {}
+    pending_preorder_product_by_tg: dict[int, tuple[int, int, int]] = {}
     pending_search_by_tg: set[int] = set()
 
 
@@ -237,6 +242,7 @@ def build_dispatcher(settings: Settings, db: Database):
         return f"👥 <b>Khách hàng</b>\n\nTổng user: <b>{total}</b>\nBị chặn: <b>{banned}</b>\nCó số dư ví: <b>{with_balance}</b>"
 
     async def send_main_menu(message: Message, user_id: int | None = None) -> None:
+        # /menu is the compact control panel. /start opens the shop catalog directly.
         lang = users.get_language(user_id) if user_id else "vi"
         balances = wallet.get_balances(user_id) if user_id else {}
         await message.answer(
@@ -252,6 +258,26 @@ def build_dispatcher(settings: Settings, db: Database):
             callback,
             views.welcome(settings.shop_name, balances, lang),
             reply_markup=main_inline_keyboard(lang),
+        )
+
+    async def send_shop_home(message: Message, user_id: int | None = None) -> None:
+        lang = users.get_language(user_id) if user_id else "vi"
+        balances = wallet.get_balances(user_id) if user_id else {}
+        cats = catalog.list_categories()
+        await message.answer(
+            views.shop_home(settings.shop_name, cats, balances, lang),
+            reply_markup=categories_keyboard(cats),
+            parse_mode="HTML",
+        )
+
+    async def edit_shop_home(callback: CallbackQuery, user_id: int | None = None) -> None:
+        lang = users.get_language(user_id) if user_id else "vi"
+        balances = wallet.get_balances(user_id) if user_id else {}
+        cats = catalog.list_categories()
+        await edit_or_answer_callback(
+            callback,
+            views.shop_home(settings.shop_name, cats, balances, lang),
+            reply_markup=categories_keyboard(cats),
         )
 
     async def send_categories(message: Message) -> None:
@@ -304,6 +330,32 @@ def build_dispatcher(settings: Settings, db: Database):
             await message.answer(f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
 
+    async def create_preorder_and_edit_callback(callback: CallbackQuery, user_id: int, product_id: int, quantity: int) -> None:
+        if quantity <= 0:
+            await edit_or_answer_callback(callback, "❌ Số lượng đặt trước phải lớn hơn 0.")
+            return
+        product = get_product(product_id)
+        if not product:
+            await edit_or_answer_callback(callback, "❌ Sản phẩm không tồn tại hoặc đã tắt bán.")
+            return
+        try:
+            preorder = preorders.create_preorder(user_id=user_id, product_id=product_id, quantity=quantity)
+            balances = wallet.get_balances(user_id)
+            await edit_or_answer_callback(callback, views.preorder_created(preorder, balances), reply_markup=preorder_payment_keyboard(preorder["id"]))
+        except Exception as exc:
+            await edit_or_answer_callback(callback, f"❌ Không tạo được đơn đặt trước: <code>{views.h(exc)}</code>")
+
+    async def create_preorder_and_edit_by_id(message: Message, user_id: int, product_id: int, quantity: int, chat_id: int, message_id: int) -> None:
+        if quantity <= 0:
+            await edit_or_answer_by_id(message, chat_id, message_id, "❌ Số lượng đặt trước phải lớn hơn 0.")
+            return
+        try:
+            preorder = preorders.create_preorder(user_id=user_id, product_id=product_id, quantity=quantity)
+            balances = wallet.get_balances(user_id)
+            await edit_or_answer_by_id(message, chat_id, message_id, views.preorder_created(preorder, balances), reply_markup=preorder_payment_keyboard(preorder["id"]))
+        except Exception as exc:
+            await edit_or_answer_by_id(message, chat_id, message_id, f"❌ Không tạo được đơn đặt trước: <code>{views.h(exc)}</code>")
+
     def payment_extra_for_bank(intent: dict) -> tuple[str, str | None]:
         if settings.bank_bin and settings.bank_account and settings.bank_owner:
             bank = BankAccount(
@@ -330,12 +382,17 @@ def build_dispatcher(settings: Settings, db: Database):
     @router.message(CommandStart())
     async def start(message: Message):
         user_id = ensure_user_from_message(message)
-        await send_main_menu(message, user_id)
+        await send_shop_home(message, user_id)
 
     @router.message(Command("menu"))
     async def menu(message: Message):
         user_id = ensure_user_from_message(message)
         await send_main_menu(message, user_id)
+
+    @router.message(Command("products"))
+    async def products_command(message: Message):
+        user_id = ensure_user_from_message(message)
+        await send_shop_home(message, user_id)
 
     @router.message(Command("admin"))
     async def admin(message: Message):
@@ -382,6 +439,11 @@ def build_dispatcher(settings: Settings, db: Database):
 
     @router.message(F.text.in_(menu_texts("wallet")))
     async def wallet_msg(message: Message):
+        user_id = ensure_user_from_message(message)
+        await send_wallet(message, user_id)
+
+    @router.message(Command("wallet"))
+    async def wallet_command(message: Message):
         user_id = ensure_user_from_message(message)
         await send_wallet(message, user_id)
 
@@ -455,16 +517,24 @@ def build_dispatcher(settings: Settings, db: Database):
         user_id = ensure_user_from_message(message)
         telegram_id = int(message.from_user.id)
         pending = pending_quantity_product_by_tg.pop(telegram_id, None)
-        if pending is None:
-            if telegram_id in pending_search_by_tg:
-                pending_search_by_tg.discard(telegram_id)
-                await send_search_results(message, (message.text or "").strip())
+        if pending is not None:
+            product_id, chat_id, message_id = pending
+            try:
+                await create_order_and_edit_by_id(message, user_id, int(product_id), int(message.text or "0"), int(chat_id), int(message_id))
+            except Exception as exc:
+                await message.answer(f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
             return
-        product_id, chat_id, message_id = pending
-        try:
-            await create_order_and_edit_by_id(message, user_id, int(product_id), int(message.text or "0"), int(chat_id), int(message_id))
-        except Exception as exc:
-            await message.answer(f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
+        preorder_pending = pending_preorder_product_by_tg.pop(telegram_id, None)
+        if preorder_pending is not None:
+            product_id, chat_id, message_id = preorder_pending
+            try:
+                await create_preorder_and_edit_by_id(message, user_id, int(product_id), int(message.text or "0"), int(chat_id), int(message_id))
+            except Exception as exc:
+                await message.answer(f"❌ Không tạo được đơn đặt trước: <code>{views.h(exc)}</code>", parse_mode="HTML")
+            return
+        if telegram_id in pending_search_by_tg:
+            pending_search_by_tg.discard(telegram_id)
+            await send_search_results(message, (message.text or "").strip())
 
     @router.message(F.text.in_(menu_texts("support")))
     async def support_msg(message: Message):
@@ -656,11 +726,35 @@ def build_dispatcher(settings: Settings, db: Database):
         await edit_main_menu(callback, user_id)
         await callback.answer()
 
+    @router.callback_query(F.data == "refresh:home")
+    async def cb_refresh_home(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        await edit_shop_home(callback, user_id)
+        await callback.answer("Đã làm mới")
+
+    @router.callback_query(F.data == "refresh:products")
+    async def cb_refresh_products(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        products = catalog.list_products()
+        await edit_or_answer_callback(callback, views.product_list(products), reply_markup=products_keyboard(products))
+        await callback.answer("Đã làm mới")
+
+    @router.callback_query(F.data.startswith("refresh:cat:"))
+    async def cb_refresh_category(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        category_id = int(callback.data.split(":", 2)[2])
+        products = catalog.list_products(category_id)
+        await edit_or_answer_callback(
+            callback,
+            views.product_list(products, get_category_name(category_id)),
+            reply_markup=products_keyboard(products, category_id),
+        )
+        await callback.answer("Đã làm mới")
+
     @router.callback_query(F.data == "buy:categories")
     async def cb_categories(callback: CallbackQuery):
-        ensure_user_from_callback(callback)
-        cats = catalog.list_categories()
-        await edit_or_answer_callback(callback, views.category_list(cats), reply_markup=categories_keyboard(cats))
+        user_id = ensure_user_from_callback(callback)
+        await edit_shop_home(callback, user_id)
         await callback.answer()
 
     @router.callback_query(F.data.startswith("cat:"))
@@ -766,6 +860,51 @@ def build_dispatcher(settings: Settings, db: Database):
             f"Bạn có thể nhắn một số, ví dụ: <code>3</code>\n"
             f"Hoặc dùng lệnh: <code>/mua {product_id} 3</code>",
         )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("preorderqty:"))
+    async def cb_preorder_quantity(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        _, product_id_s, quantity_s = callback.data.split(":", 2)
+        await create_preorder_and_edit_callback(callback, user_id, int(product_id_s), int(quantity_s))
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("preordercustom:"))
+    async def cb_preorder_custom_quantity(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        product_id = int(callback.data.split(":", 1)[1])
+        pending_preorder_product_by_tg[int(callback.from_user.id)] = (product_id, int(callback.message.chat.id), int(callback.message.message_id))
+        product = get_product(product_id)
+        await edit_or_answer_callback(
+            callback,
+            f"🧾 Nhập số lượng muốn đặt trước cho <b>{views.h((product or {}).get('name') or product_id)}</b>.\n\n"
+            f"Bạn có thể nhắn một số, ví dụ: <code>3</code>.\n"
+            f"Phí đặt trước hiện tại: <b>{settings.preorder_deposit_percent}%</b> tổng tiền.",
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("prepaywallet:"))
+    async def cb_preorder_pay_wallet(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        preorder_id = int(callback.data.split(":", 1)[1])
+        try:
+            preorder = preorders.pay_deposit_with_wallet(preorder_id, expected_user_id=user_id)
+            await edit_or_answer_callback(callback, views.preorder_paid(preorder), reply_markup=main_inline_keyboard(users.get_language(user_id)))
+        except InsufficientFunds:
+            await edit_or_answer_callback(callback, "❌ Số dư ví không đủ để thanh toán phí đặt trước. Hãy bấm ➕ Nạp ví rồi quay lại thanh toán.", reply_markup=preorder_payment_keyboard(preorder_id))
+        except (PreorderStateError, PreorderOwnershipError) as exc:
+            await edit_or_answer_callback(callback, f"❌ Không thanh toán được đặt trước: <code>{views.h(exc)}</code>")
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("precancel:"))
+    async def cb_preorder_cancel(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        preorder_id = int(callback.data.split(":", 1)[1])
+        try:
+            preorders.cancel_preorder(preorder_id, expected_user_id=user_id)
+            await edit_or_answer_callback(callback, "✅ Đã hủy đơn đặt trước.", reply_markup=main_inline_keyboard(users.get_language(user_id)))
+        except Exception as exc:
+            await edit_or_answer_callback(callback, f"❌ Không hủy được đặt trước: <code>{views.h(exc)}</code>")
         await callback.answer()
 
     @router.callback_query(F.data.startswith("paywallet:"))
@@ -894,6 +1033,21 @@ def build_dispatcher(settings: Settings, db: Database):
         pending_search_by_tg.add(int(callback.from_user.id))
         await edit_or_answer_callback(callback, views.search_prompt())
         await callback.answer()
+
+
+    @router.callback_query(F.data == "api:open")
+    async def cb_api_open(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        key = users.ensure_api_key(user_id)
+        await edit_or_answer_callback(callback, views.api_link(key, settings.api_public_base_url), reply_markup=api_link_keyboard())
+        await callback.answer()
+
+    @router.callback_query(F.data == "api:regen")
+    async def cb_api_regen(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        key = users.rotate_api_key(user_id)
+        await edit_or_answer_callback(callback, views.api_link(key, settings.api_public_base_url), reply_markup=api_link_keyboard())
+        await callback.answer("Đã tạo API key mới")
 
     @router.callback_query(F.data == "support:main")
     async def cb_support_main(callback: CallbackQuery):

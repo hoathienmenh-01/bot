@@ -31,6 +31,35 @@ def welcome(shop_name: str, balances: dict[str, int] | None = None, lang: str | 
     )
 
 
+def shop_home(shop_name: str, categories: list[dict], balances: dict[str, int] | None = None, lang: str | None = "vi") -> str:
+    lang = normalize_lang(lang)
+    lines = [
+        "🎉 <b>WELCOME</b>",
+        f"Chào mừng bạn đến với <b>{h(shop_name)}</b>",
+        "<b>UY TÍN TẠO NÊN THƯƠNG HIỆU</b>",
+        "",
+        "Cảm ơn bạn đã tin tưởng và sử dụng hệ thống mua hàng tự động của chúng tôi.",
+        "",
+        "⚡ <b>TẠI ĐÂY</b>",
+        "• Mua hàng tự động 24/7",
+        "• Thanh toán QR - xác nhận tức thì",
+        "• Nhận file ngay sau khi thanh toán",
+        "",
+        _wallet_block(balances or {}, lang),
+        "",
+        "Đây là bot tự động order 24/7",
+        "👇 Vui lòng chọn danh mục/sản phẩm bên dưới 👇",
+    ]
+    if categories:
+        lines.extend(["", "<b>Danh mục</b>"])
+        for cat in categories[:30]:
+            stock = int(cat.get("available_stock") or 0)
+            status = "🟢" if stock > 0 else "🔴"
+            icon = str(cat.get("category_icon") or "📁").strip() or "📁"
+            lines.append(f"{status} {h(icon)} {h(cat['name'])} [{stock}]")
+    return "\n".join(lines)
+
+
 def profile(profile: dict, telegram_id: int | str, username: str | None) -> str:
     balances = profile.get("balances", {})
     if balances:
@@ -50,8 +79,14 @@ def profile(profile: dict, telegram_id: int | str, username: str | None) -> str:
 def category_list(categories: list[dict]) -> str:
     if not categories:
         return "🛒 Hiện chưa có danh mục sản phẩm nào. Admin cần thêm danh mục trước."
-    return "🛒 <b>Chọn danh mục sản phẩm</b>\n\nBấm vào một danh mục bên dưới để xem sản phẩm."
-
+    lines = ["🛒 <b>Chọn danh mục sản phẩm</b>", "", "🟢 còn hàng · 🔴 hết hàng/tạm chưa có hàng", ""]
+    for cat in categories[:30]:
+        stock = int(cat.get("available_stock") or 0)
+        status = "🟢" if stock > 0 else "🔴"
+        icon = str(cat.get("category_icon") or "📁").strip() or "📁"
+        lines.append(f"{status} {h(icon)} <b>{h(cat['name'])}</b> · còn <b>{stock}</b>")
+    lines.append("\nBấm vào một danh mục bên dưới để xem sản phẩm.")
+    return "\n".join(lines)
 
 def _product_icon_html(product: dict) -> str:
     icon = str(product.get("product_icon") or "📦").strip() or "📦"
@@ -80,7 +115,7 @@ def product_list(products: list[dict], category_name: str | None = None) -> str:
         return "📦 Danh mục này hiện chưa có sản phẩm đang bán hoặc đã hết hàng."
     title = f"📦 <b>{h(category_name)}</b>" if category_name else "📦 <b>Sản phẩm đang bán</b>"
     lines = [title, ""]
-    for product in products[:20]:
+    for product in products[:100]:
         lines.append(
             f"{_product_icon_html(product)} <b>{h(product['name'])}</b> | "
             f"{fmt_money(int(product['price_minor']), product['currency'])} | "
@@ -111,8 +146,11 @@ def product_detail(product: dict) -> str:
         "",
         f"🛡 <b>Bảo hành</b>\n{h(product.get('warranty_text') or 'Theo chính sách shop')}",
         "",
-        "👇 Chọn số lượng muốn mua bên dưới. Nếu muốn mua số lượng khác, bấm <b>Nhập số lượng khác</b>.",
     ])
+    if stock > 0:
+        parts.append("👇 Chọn số lượng muốn mua bên dưới. Nếu muốn mua số lượng khác, bấm <b>Nhập số lượng khác</b>.")
+    else:
+        parts.append("🧾 Sản phẩm đang hết hàng. Bạn có thể bấm <b>Đặt trước</b>; phí đặt trước tính theo % shop cấu hình và được trừ khi admin xử lý đơn.")
     return "\n".join(parts)
 
 def order_created(order: dict, balances: dict[str, int] | None = None) -> str:
@@ -136,6 +174,38 @@ def order_created(order: dict, balances: dict[str, int] | None = None) -> str:
         "Chọn phương thức thanh toán bên dưới. Nếu quá hạn, hàng giữ tạm sẽ tự trả về kho."
     )
 
+
+def preorder_created(preorder: dict, balances: dict[str, int] | None = None) -> str:
+    current_balance = int((balances or {}).get(preorder["currency"], 0))
+    deposit = int(preorder["deposit_amount_minor"] or 0)
+    missing = max(0, deposit - current_balance)
+    balance_line = f"Số dư ví hiện tại: <b>{fmt_money(current_balance, preorder['currency'])}</b>"
+    if missing:
+        balance_line += f"\nCòn thiếu để đặt trước: <b>{fmt_money(missing, preorder['currency'])}</b>"
+    else:
+        balance_line += "\n✅ Ví đủ tiền để thanh toán phí đặt trước."
+    return (
+        f"🧾 <b>Đơn đặt trước {h(preorder['public_code'])}</b>\n\n"
+        f"Sản phẩm: <b>{h(preorder['product_name'])}</b>\n"
+        f"Số lượng: <b>{int(preorder['quantity'])}</b>\n"
+        f"Đơn giá dự kiến: <b>{fmt_money(int(preorder['unit_amount_minor']), preorder['currency'])}</b>\n"
+        f"Tổng dự kiến: <b>{fmt_money(int(preorder['total_amount_minor']), preorder['currency'])}</b>\n"
+        f"Phí đặt trước: <b>{int(preorder['deposit_percent'])}%</b> = <b>{fmt_money(deposit, preorder['currency'])}</b>\n"
+        f"{balance_line}\n"
+        f"Trạng thái: <b>Chờ thanh toán phí đặt trước</b>\n\n"
+        "Sau khi thanh toán phí đặt trước, admin sẽ thấy đơn trong Web Admin → Đặt trước và xử lý khi có hàng."
+    )
+
+
+def preorder_paid(preorder: dict) -> str:
+    return (
+        f"✅ <b>Đã nhận đặt trước {h(preorder['public_code'])}</b>\n\n"
+        f"Sản phẩm: <b>{h(preorder['product_name'])}</b>\n"
+        f"Số lượng: <b>{int(preorder['quantity'])}</b>\n"
+        f"Phí đã cọc: <b>{fmt_money(int(preorder['deposit_amount_minor']), preorder['currency'])}</b>\n"
+        f"Trạng thái: <b>Đang đặt trước</b>\n\n"
+        "Khi shop nhập thêm hàng, admin sẽ xử lý đơn đặt trước của bạn."
+    )
 
 def payment_instruction(intent: dict, *, provider_label: str, extra: str = "") -> str:
     return (
@@ -420,7 +490,7 @@ def search_results(query: str, products: list[dict]) -> str:
             "Không tìm thấy sản phẩm phù hợp. Hãy thử từ khóa ngắn hơn hoặc bấm 🛒 Mua ngay để xem tất cả danh mục."
         )
     lines = ["🔎 <b>Kết quả tìm kiếm</b>", "", f"Từ khóa: <code>{h(query)}</code>", ""]
-    for product in products[:20]:
+    for product in products[:100]:
         stock = int(product.get("available_stock") or 0)
         lines.append(
             f"#{product['id']} — <b>{h(product['name'])}</b>\n"
@@ -428,3 +498,21 @@ def search_results(query: str, products: list[dict]) -> str:
         )
     lines.append("\nBấm nút sản phẩm bên dưới để xem chi tiết/mua hàng.")
     return "\n\n".join(lines)
+
+
+
+def api_link(api_key: str, base_url: str) -> str:
+    base = (base_url or "http://127.0.0.1:8080").rstrip("/")
+    return (
+        "🔗 <b>Liên kết API</b>\n\n"
+        "API Key của bạn là:\n"
+        f"<code>{h(api_key)}</code>\n"
+        "(chạm để copy)\n\n"
+        "⚠️ Giữ key an toàn — đừng chia sẻ với ai. Nếu lộ, bấm 🔄 Tạo key mới; key cũ sẽ ngừng hoạt động.\n\n"
+        "<b>Tài liệu đầy đủ tại:</b>\n"
+        f"{h(base)}/t/api-guide\n\n"
+        "<b>Danh sách API:</b>\n"
+        "• <code>GET /api/telegram-buyer/products</code>: Liệt kê sản phẩm hiện có.\n"
+        "• <code>POST /api/telegram-buyer/purchase</code>: Mua sản phẩm bằng số dư ví.\n\n"
+        "Lưu ý: Bạn cần nạp ví trước khi gọi API mua hàng. Gửi key bằng header: <code>X-API-Key</code> hoặc <code>Authorization: Bearer ...</code>."
+    )

@@ -39,6 +39,9 @@ class Settings:
     binance_pay_webhook_url: str = ""
     support_contact: str = ""
     sepay_poll_seconds: int = 30
+    preorder_deposit_percent: int = 10
+    stock_duplicate_policy: str = "allow"
+    api_public_base_url: str = "http://127.0.0.1:8080"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -63,4 +66,7 @@ class Settings:
             binance_pay_webhook_url=os.getenv("BINANCE_PAY_WEBHOOK_URL", ""),
             support_contact=os.getenv("SUPPORT_CONTACT", ""),
             sepay_poll_seconds=int(os.getenv("SEPAY_POLL_SECONDS", "30")),
+            preorder_deposit_percent=max(0, min(100, int(os.getenv("PREORDER_DEPOSIT_PERCENT", "10")))),
+            stock_duplicate_policy=os.getenv("STOCK_DUPLICATE_POLICY", "allow").strip().lower(),
+            api_public_base_url=os.getenv("API_PUBLIC_BASE_URL", "http://127.0.0.1:8080").strip().rstrip("/"),
         )

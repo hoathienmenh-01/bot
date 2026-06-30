@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import http.cookiejar
+import json
 import re
 import tempfile
 import threading
 import unittest
 import urllib.parse
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 from nimo_shop.db import Database
@@ -55,11 +57,13 @@ class WebAdminTest(unittest.TestCase):
             {"category_id": str(cat_id), "name": "ChatGPT Plus", "currency": "VND", "price": "150000", "cost": "100000", "description": "30 ngày", "warranty_text": "1 đổi 1"},
             admin_id=admin_id,
         )
+        inserted = self.web.add_stock(prod_id, "acc1|pass\nacc1|pass\nacc2|pass", admin_id=admin_id)
+        self.assertEqual(inserted, 3)
+        self.assertEqual(self.web.counts()["available_stock"], 3)
+        self.web.update_settings({"STOCK_DUPLICATE_POLICY": "reject"}, admin_id=admin_id)
         with self.assertRaises(ValueError):
-            self.web.add_stock(prod_id, "acc1|pass\nacc1|pass\nacc2|pass", admin_id=admin_id)
-        inserted = self.web.add_stock(prod_id, "acc1|pass\nacc2|pass", admin_id=admin_id)
-        self.assertEqual(inserted, 2)
-        self.assertEqual(self.web.counts()["available_stock"], 2)
+            self.web.add_stock(prod_id, "acc1|pass\nacc3|pass", admin_id=admin_id)
+        self.web.update_settings({"STOCK_DUPLICATE_POLICY": "allow"}, admin_id=admin_id)
 
         self.web.update_product(
             prod_id,
@@ -448,3 +452,81 @@ class WebAdminV24ProductMediaTest(unittest.TestCase):
         with zipfile.ZipFile(backup) as zf:
             self.assertIn(f"media/products/product_{self.product}.png", zf.namelist())
 
+
+class WebAdminV25CategoryPreorderTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db = Database(self.root / "shop.db")
+        self.web = AdminWebService(self.db, project_root=self.root)
+        self.web.init(bootstrap_username="owner", bootstrap_password="StrongPass123")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_category_icons_preorder_settings_and_management(self) -> None:
+        admin = self.web.authenticate("owner", "StrongPass123")
+        self.assertIsNotNone(admin)
+        admin_id = int(admin["id"])
+        cat_id = self.web.create_category("ChatGPT", category_icon="🤖", admin_id=admin_id)
+        cats = self.web.list_categories()
+        self.assertEqual(cats[0]["category_icon"], "🤖")
+        self.web.update_category(cat_id, name="ChatGPT AI", category_icon="✨", sort_order=1, is_active=True, admin_id=admin_id)
+        self.assertEqual(self.web.list_categories()[0]["category_icon"], "✨")
+        prod_id = self.web.create_product({"category_id": str(cat_id), "name": "Plus", "currency": "VND", "price": "100000", "cost": "0"}, admin_id=admin_id)
+        uid = UserService(self.db).get_or_create(999, "buyer", "Buyer")
+        from nimo_shop.services.preorders import PreorderService
+        pr = PreorderService(self.db, 15).create_preorder(user_id=uid, product_id=prod_id, quantity=2)
+        self.assertEqual(self.web.list_preorders()[0]["id"], pr["id"])
+        self.web.fulfill_preorder(pr["id"], admin_id=admin_id)
+        self.assertEqual(self.web.list_preorders(status="fulfilled")[0]["id"], pr["id"])
+        self.web.update_settings({"PREORDER_DEPOSIT_PERCENT": "15"}, admin_id=admin_id, write_env=True)
+        self.assertIn("PREORDER_DEPOSIT_PERCENT=15", (self.root / ".env").read_text(encoding="utf-8"))
+
+class BuyerApiTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "shop.db"
+        self.db = Database(self.db_path)
+        self.web = AdminWebService(self.db, project_root=self.root)
+        self.web.init(bootstrap_username="owner", bootstrap_password="StrongPass123")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_buyer_api_lists_products_and_purchases_with_wallet(self) -> None:
+        cat = CatalogService(self.db).add_category("ChatGPT")
+        prod = CatalogService(self.db).add_product(category_id=cat, name="ChatGPT Plus", description="", currency="VND", price_minor=50_000)
+        CatalogService(self.db).add_stock(prod, ["acc-a", "acc-b"])
+        users = UserService(self.db)
+        user_id = users.get_or_create(999000111, "apiuser", "API User")
+        api_key = users.ensure_api_key(user_id)
+        from nimo_shop.services.wallet import WalletService
+        WalletService(self.db).credit(user_id, "VND", 100_000, reason="test", idempotency_key="api-credit")
+
+        server = create_server(str(self.db_path), host="127.0.0.1", port=0, session_secret="secret", project_root=self.root, bootstrap_username="owner", bootstrap_password="StrongPass123")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(base + "/api/telegram-buyer/products")
+            self.assertEqual(cm.exception.code, 401)
+
+            req = urllib.request.Request(base + "/api/telegram-buyer/products", headers={"X-API-Key": api_key})
+            data = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+            self.assertTrue(data["ok"])
+            self.assertEqual(len(data["products"]), 1)
+            self.assertEqual(data["products"][0]["available_stock"], 2)
+
+            body = json.dumps({"product_id": prod, "quantity": 2}).encode("utf-8")
+            req = urllib.request.Request(base + "/api/telegram-buyer/purchase", data=body, method="POST", headers={"X-API-Key": api_key, "Content-Type": "application/json"})
+            purchased = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+            self.assertTrue(purchased["ok"])
+            self.assertEqual(purchased["order"]["status"], "delivered")
+            self.assertEqual(purchased["delivery"], ["acc-a", "acc-b"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)

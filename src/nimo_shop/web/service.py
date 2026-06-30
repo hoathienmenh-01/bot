@@ -20,6 +20,7 @@ from nimo_shop.services.finance import FinanceService
 from nimo_shop.services.orders import OrderService
 from nimo_shop.services.notifications import NotificationService
 from nimo_shop.services.payments import PaymentService
+from nimo_shop.services.preorders import PreorderService
 from nimo_shop.services.wallet import WalletService
 from nimo_shop.web.security import hash_password, verify_password
 
@@ -179,6 +180,9 @@ DEFAULT_SETTING_KEYS: dict[str, tuple[str, int]] = {
     "DELIVERY_OUTPUT_MODE": ("auto", 0),
     "DELIVERY_FILE_THRESHOLD": ("20", 0),
     "LOW_STOCK_THRESHOLD": ("5", 0),
+    "PREORDER_DEPOSIT_PERCENT": ("10", 0),
+    "STOCK_DUPLICATE_POLICY": ("allow", 0),
+    "API_PUBLIC_BASE_URL": ("http://127.0.0.1:8080", 0),
 }
 
 
@@ -251,21 +255,33 @@ class AdminWebService:
 
     def list_categories(self) -> list[dict]:
         with self.db.connect() as conn:
-            return [dict(r) for r in conn.execute("SELECT * FROM categories ORDER BY sort_order, id")]
+            return [dict(r) for r in conn.execute(
+                """
+                SELECT c.*,
+                       COALESCE(SUM(CASE WHEN p.is_active=1 AND s.status='available' THEN 1 ELSE 0 END),0) AS available_stock,
+                       COALESCE(COUNT(DISTINCT CASE WHEN p.is_active=1 THEN p.id END),0) AS active_products
+                  FROM categories c
+                  LEFT JOIN products p ON p.category_id=c.id
+                  LEFT JOIN stock_items s ON s.product_id=p.id
+                 GROUP BY c.id
+                 ORDER BY c.sort_order, c.id
+                """
+            )]
 
-    def create_category(self, name: str, sort_order: int = 100, *, admin_id: int | None = None) -> int:
-        category_id = CatalogService(self.db).add_category(name, sort_order)
+    def create_category(self, name: str, sort_order: int = 100, category_icon: str = "📁", *, admin_id: int | None = None) -> int:
+        category_id = CatalogService(self.db).add_category(name, sort_order, category_icon=category_icon)
         self.log(admin_id, "category.create", "category", str(category_id), {"name": name})
         return category_id
 
-    def update_category(self, category_id: int, *, name: str, sort_order: int, is_active: bool, admin_id: int | None = None) -> None:
+    def update_category(self, category_id: int, *, name: str, sort_order: int, is_active: bool, category_icon: str = "📁", admin_id: int | None = None) -> None:
         if not name.strip():
             raise ValueError("category name is required")
+        icon = (category_icon or "📁").strip() or "📁"
         with self.db.transaction() as conn:
-            row = conn.execute("UPDATE categories SET name=?, sort_order=?, is_active=? WHERE id=?", (name.strip(), sort_order, 1 if is_active else 0, category_id)).rowcount
+            row = conn.execute("UPDATE categories SET name=?, category_icon=?, sort_order=?, is_active=? WHERE id=?", (name.strip(), icon, sort_order, 1 if is_active else 0, category_id)).rowcount
             if row == 0:
                 raise ValueError("category not found")
-        self.log(admin_id, "category.update", "category", str(category_id), {"name": name, "active": is_active})
+        self.log(admin_id, "category.update", "category", str(category_id), {"name": name, "active": is_active, "icon": icon})
 
     def list_products(self) -> list[dict]:
         with self.db.connect() as conn:
@@ -685,16 +701,22 @@ class AdminWebService:
             labels = str(profile.get("stock_format_labels") or "")
         return mode, labels
 
+    def stock_duplicate_policy(self) -> str:
+        settings = self.get_settings()
+        value = str(settings.get("STOCK_DUPLICATE_POLICY", {"value": os.getenv("STOCK_DUPLICATE_POLICY", "allow")}).get("value") or "allow").strip().lower()
+        return value if value in {"allow", "skip", "reject"} else "allow"
+
     def add_stock(self, product_id: int, raw_lines: str, *, admin_id: int | None = None, parser_mode: str = "product") -> int:
         parser_mode, custom_labels = self._resolve_stock_parser(product_id, parser_mode)
         parsed = self.parse_stock_text(raw_lines, parser_mode=parser_mode, custom_labels=custom_labels)
         lines = parsed["lines"]
+        policy = self.stock_duplicate_policy()
         duplicates = parsed.get("duplicates") or []
-        if duplicates:
+        if duplicates and policy == "reject":
             sample = ", ".join(self.mask_stock_line(str(x), str(parsed.get("detected") or "raw"), custom_labels=custom_labels) for x in list(duplicates)[:3])
             raise ValueError(f"Dữ liệu nhập có dòng trùng. Hãy xóa/sửa dòng trùng rồi nhập lại. Ví dụ: {sample}")
-        inserted = CatalogService(self.db).add_stock(product_id, list(lines))
-        self.log(admin_id, "stock.import", "product", str(product_id), {"submitted": int(parsed["count"]), "inserted": inserted, "detected": parsed.get("detected"), "parser_mode": parser_mode})
+        inserted = CatalogService(self.db).add_stock(product_id, list(lines), duplicate_policy=policy)
+        self.log(admin_id, "stock.import", "product", str(product_id), {"submitted": int(parsed["count"]), "inserted": inserted, "detected": parsed.get("detected"), "parser_mode": parser_mode, "duplicate_policy": policy})
         return inserted
 
     def add_stock_upload(self, product_id: int, *, filename: str, data: bytes, raw_text: str = "", parser_mode: str = "product", admin_id: int | None = None) -> dict[str, object]:
@@ -898,6 +920,17 @@ class AdminWebService:
             lines.append(f"{key}={escaped}\n")
         target.write_text("".join(lines), encoding="utf-8")
         return target
+
+    def list_preorders(self, status: str | None = None, limit: int = 200) -> list[dict]:
+        return PreorderService(self.db).list_preorders(status=status, limit=limit)
+
+    def cancel_preorder(self, preorder_id: int, *, admin_id: int | None = None) -> None:
+        PreorderService(self.db).cancel_preorder(preorder_id)
+        self.log(admin_id, "preorder.cancel", "preorder", str(preorder_id), {})
+
+    def fulfill_preorder(self, preorder_id: int, *, admin_id: int | None = None) -> None:
+        PreorderService(self.db).mark_fulfilled(preorder_id)
+        self.log(admin_id, "preorder.fulfill", "preorder", str(preorder_id), {})
 
     def search_products(self, query: str, limit: int = 50) -> list[dict]:
         return CatalogService(self.db).search_products(query, limit=limit)

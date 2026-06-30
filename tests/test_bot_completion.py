@@ -235,3 +235,57 @@ class BotProductMediaViewsTest(unittest.TestCase):
         self.assertIn("🤖 ChatGPT Plus", keyboard_rows)
         self.assertIn("📦 12", keyboard_rows)
 
+
+class BotCategoryPreorderViewsTest(unittest.TestCase):
+    def test_category_and_product_buttons_show_stock_state_and_preorder(self) -> None:
+        rows = views.category_list([
+            {"name": "ChatGPT", "category_icon": "🤖", "available_stock": 3},
+            {"name": "Grok", "category_icon": "◼️", "available_stock": 0},
+        ])
+        self.assertIn("🟢", rows)
+        self.assertIn("🔴", rows)
+        keyboard = str(product_detail_keyboard_rows(10, 0))
+        self.assertIn("preorderqty:10:1", keyboard)
+        self.assertIn("preordercustom:10", keyboard)
+
+    def test_preorder_views_render_deposit_and_wallet_balance(self) -> None:
+        preorder = {
+            "public_code": "PREABC123",
+            "product_name": "ChatGPT Plus",
+            "quantity": 2,
+            "currency": "VND",
+            "unit_amount_minor": 100_000,
+            "total_amount_minor": 200_000,
+            "deposit_percent": 10,
+            "deposit_amount_minor": 20_000,
+        }
+        text = views.preorder_created(preorder, {"VND": 10_000})
+        self.assertIn("Đơn đặt trước", text)
+        self.assertIn("10%", text)
+        self.assertIn("Còn thiếu", text)
+        paid = views.preorder_paid(preorder)
+        self.assertIn("Đã nhận đặt trước", paid)
+
+class V26BotUiTest(unittest.TestCase):
+    def test_categories_keyboard_is_grid_and_has_refresh(self) -> None:
+        from nimo_shop.bot.keyboards import categories_keyboard_rows
+        cats = [
+            {"id": 1, "name": "ChatGPT", "category_icon": "🤖", "available_stock": 2},
+            {"id": 2, "name": "Gemini", "category_icon": "🌈", "available_stock": 0},
+            {"id": 3, "name": "Grok", "category_icon": "◼️", "available_stock": 1},
+            {"id": 4, "name": "Canva", "category_icon": "🟣", "available_stock": 5},
+        ]
+        rows = categories_keyboard_rows(cats)
+        self.assertEqual(len(rows[0]), 3)
+        self.assertIn("refresh:home", str(rows))
+        self.assertIn("🟢", str(rows))
+        self.assertIn("🔴", str(rows))
+
+    def test_api_link_view_contains_documentation_and_regenerate_button(self) -> None:
+        from nimo_shop.bot import views
+        from nimo_shop.bot.keyboards import api_link_keyboard_rows
+        text = views.api_link("tgb_test", "https://example.test")
+        self.assertIn("GET /api/telegram-buyer/products", text)
+        self.assertIn("POST /api/telegram-buyer/purchase", text)
+        self.assertIn("tgb_test", text)
+        self.assertIn("api:regen", str(api_link_keyboard_rows()))

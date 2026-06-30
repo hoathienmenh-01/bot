@@ -12,6 +12,10 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from nimo_shop.db import Database
 from nimo_shop.money import fmt_money, from_minor
+from nimo_shop.services.catalog import CatalogService
+from nimo_shop.services.orders import OrderService, OutOfStock
+from nimo_shop.services.users import UserService
+from nimo_shop.services.wallet import InsufficientFunds, WalletService
 from nimo_shop.web.security import create_session, csrf_token, read_session, verify_csrf
 from nimo_shop.web.service import AdminWebService, DEFAULT_SETTING_KEYS, STOCK_FORMATS
 
@@ -19,7 +23,7 @@ LANG = {
     "vi": {
         "dashboard": "Tổng quan", "orders": "Đơn hàng", "products": "Sản phẩm", "categories": "Danh mục",
         "stock": "Kho hàng", "users": "Người dùng", "wallets": "Ví", "finance": "Dòng tiền",
-        "payments": "Thanh toán", "settings": "Cấu hình", "audit": "Kiểm tra hệ thống", "logs": "Nhật ký admin", "bots": "Quản lý bot", "notifications": "Thông báo bot", "backup": "Backup dữ liệu", "guide": "Hướng dẫn", "status": "Trạng thái", "imports": "Nhập/Xuất", "exports": "Báo cáo", "reconcile": "Đối soát", "coupons": "Mã giảm giá", "roles": "Phân quyền", "deliveries": "Lịch sử giao hàng", "low_stock": "Cảnh báo kho",
+        "payments": "Thanh toán", "settings": "Cấu hình", "audit": "Kiểm tra hệ thống", "logs": "Nhật ký admin", "bots": "Quản lý bot", "notifications": "Thông báo bot", "backup": "Backup dữ liệu", "guide": "Hướng dẫn", "status": "Trạng thái", "imports": "Nhập/Xuất", "exports": "Báo cáo", "reconcile": "Đối soát", "coupons": "Mã giảm giá", "roles": "Phân quyền", "deliveries": "Lịch sử giao hàng", "low_stock": "Cảnh báo kho", "preorders": "Đặt trước",
         "login": "Đăng nhập", "logout": "Đăng xuất", "save": "Lưu thay đổi", "create": "Tạo mới",
         "import_stock": "Nhập kho", "confirm_payment": "Xác nhận thanh toán", "light": "Sáng", "dark": "Tối",
         "language": "Ngôn ngữ", "theme": "Giao diện", "welcome": "Trang quản lý NIMO Shop",
@@ -29,7 +33,7 @@ LANG = {
     "en": {
         "dashboard": "Dashboard", "orders": "Orders", "products": "Products", "categories": "Categories",
         "stock": "Inventory", "users": "Users", "wallets": "Wallets", "finance": "Finance",
-        "payments": "Payments", "settings": "Settings", "audit": "System Audit", "logs": "Admin Logs", "bots": "Bot Manager", "notifications": "Bot Notifications", "backup": "Data Backup", "guide": "Guide", "status": "Status", "imports": "Import/Export", "exports": "Reports", "reconcile": "Reconciliation", "coupons": "Coupons", "roles": "Roles", "deliveries": "Delivery Logs", "low_stock": "Low Stock",
+        "payments": "Payments", "settings": "Settings", "audit": "System Audit", "logs": "Admin Logs", "bots": "Bot Manager", "notifications": "Bot Notifications", "backup": "Data Backup", "guide": "Guide", "status": "Status", "imports": "Import/Export", "exports": "Reports", "reconcile": "Reconciliation", "coupons": "Coupons", "roles": "Roles", "deliveries": "Delivery Logs", "low_stock": "Low Stock", "preorders": "Preorders",
         "login": "Login", "logout": "Logout", "save": "Save changes", "create": "Create",
         "import_stock": "Import stock", "confirm_payment": "Confirm payment", "light": "Light", "dark": "Dark",
         "language": "Language", "theme": "Theme", "welcome": "NIMO Shop Admin",
@@ -39,7 +43,7 @@ LANG = {
 }
 
 NAV = [
-    ("/", "dashboard"), ("/orders", "orders"), ("/products", "products"), ("/categories", "categories"),
+    ("/", "dashboard"), ("/orders", "orders"), ("/preorders", "preorders"), ("/products", "products"), ("/categories", "categories"),
     ("/stock", "stock"), ("/users", "users"), ("/wallets", "wallets"), ("/finance", "finance"),
     ("/payments", "payments"), ("/reconcile", "reconcile"), ("/bots", "bots"), ("/notifications", "notifications"),
     ("/backup", "backup"), ("/imports", "imports"), ("/exports", "exports"), ("/coupons", "coupons"), ("/low-stock", "low_stock"),
@@ -70,12 +74,12 @@ SETTING_GROUPS = [
     {
         "title": "5. Giao hàng cho khách",
         "desc": "Chọn cách bot gửi tài khoản/key sau khi khách thanh toán. Nên dùng file nếu bán nhiều dòng hoặc muốn khách dễ lưu lại.",
-        "keys": ["DELIVERY_OUTPUT_MODE", "DELIVERY_FILE_THRESHOLD", "LOW_STOCK_THRESHOLD"],
+        "keys": ["DELIVERY_OUTPUT_MODE", "DELIVERY_FILE_THRESHOLD", "LOW_STOCK_THRESHOLD", "PREORDER_DEPOSIT_PERCENT", "STOCK_DUPLICATE_POLICY"],
     },
     {
         "title": "6. Web Admin",
         "desc": "Tài khoản đăng nhập trang quản trị, giao diện mặc định và cổng chạy web.",
-        "keys": ["WEB_ADMIN_USERNAME", "WEB_ADMIN_PASSWORD", "WEB_SESSION_SECRET", "WEB_HOST", "WEB_PORT", "WEB_DEFAULT_LANGUAGE", "WEB_DEFAULT_THEME"],
+        "keys": ["WEB_ADMIN_USERNAME", "WEB_ADMIN_PASSWORD", "WEB_SESSION_SECRET", "WEB_HOST", "WEB_PORT", "WEB_DEFAULT_LANGUAGE", "WEB_DEFAULT_THEME", "API_PUBLIC_BASE_URL"],
     },
 ]
 
@@ -109,6 +113,7 @@ SETTING_META: dict[str, dict[str, str]] = {
     "WEB_DEFAULT_THEME": {"label": "Giao diện mặc định", "help": "light hoặc dark.", "placeholder": "light"},
     "DELIVERY_OUTPUT_MODE": {"label": "Cách giao hàng", "help": "auto = đơn nhỏ hiện trong chat, đơn lớn gửi file; file_only = mọi đơn đều gửi file; inline_and_file = đơn nhỏ vừa hiện trong chat vừa gửi file.", "placeholder": "auto"},
     "DELIVERY_FILE_THRESHOLD": {"label": "Gửi file khi từ số lượng", "help": "Chỉ áp dụng cho chế độ tự động. Ví dụ 20 nghĩa là đơn từ 20 dòng trở lên sẽ gửi file TXT.", "placeholder": "20"},
+    "PREORDER_DEPOSIT_PERCENT": {"label": "Phí đặt trước (%)", "help": "Khi sản phẩm hết hàng, khách có thể đặt trước và trả trước số % này bằng ví. Ví dụ 10 nghĩa là cọc 10% tổng tiền.", "placeholder": "10"},
     "LOW_STOCK_THRESHOLD": {"label": "Ngưỡng cảnh báo hết hàng", "help": "Web sẽ cảnh báo khi tồn kho sản phẩm nhỏ hơn hoặc bằng số này.", "placeholder": "5"},
 }
 
@@ -298,8 +303,127 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         err = f'<div class="alert err">{esc(error)}</div>' if error else ""
         return f"""<!doctype html><html lang="{esc(lang)}" data-theme="{esc(theme)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Đăng nhập - NIMO</title><style>{CSS}</style></head><body><div class="login"><div class="card login-card"><div class="brand-badge">Premium Admin</div><div class="brand">NIMO Shop Admin</div><p class="muted">Đăng nhập để quản lý sản phẩm, kho hàng, đơn, ví và cấu hình thanh toán.</p>{err}<form method="post" action="/login"><label>Tên đăng nhập<input name="username" autocomplete="username" placeholder="admin"></label><br><label>Mật khẩu<input type="password" name="password" autocomplete="current-password" placeholder="admin12345"></label><br><br><button>{esc(tr(lang,'login'))}</button></form></div></div></body></html>"""
 
+
+    def _send_json(self, payload: dict[str, Any] | list[Any], status: int = 200) -> None:
+        self._send(json.dumps(payload, ensure_ascii=False), status=status, content_type="application/json; charset=utf-8")
+
+    def _read_json_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        if not raw.strip():
+            return {}
+        if self.headers.get("Content-Type", "").startswith("application/json") or raw.strip().startswith("{"):
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        return {k: v[-1] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+
+    def _api_key_from_request(self) -> str:
+        auth = self.headers.get("Authorization", "").strip()
+        if auth.lower().startswith("bearer "):
+            return auth.split(None, 1)[1].strip()
+        return self.headers.get("X-API-Key", "").strip()
+
+    def _api_user(self) -> dict[str, Any] | None:
+        return UserService(self.service.db).find_by_api_key(self._api_key_from_request())
+
+    def _api_guide(self) -> str:
+        guide = (
+            '<!doctype html><html lang="vi"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>NIMO Buyer API Guide</title><style>' + CSS + '</style></head><body>'
+            '<div class="main"><div class="card"><h1>🔗 NIMO Telegram Buyer API</h1>'
+            '<p class="muted">API cho khách mua hàng tự động bằng số dư ví. Gửi key bằng header '
+            '<code>X-API-Key</code> hoặc <code>Authorization: Bearer &lt;key&gt;</code>.</p>'
+            '<h2>1. Liệt kê sản phẩm</h2><pre>GET /api/telegram-buyer/products\nX-API-Key: tgb_xxx</pre>'
+            '<h2>2. Mua sản phẩm bằng ví</h2><pre>POST /api/telegram-buyer/purchase\nContent-Type: application/json\nX-API-Key: tgb_xxx\n\n{"product_id":1,"quantity":2}</pre>'
+            '<p>Response thành công trả về mã đơn và danh sách dữ liệu đã giao. Bạn cần nạp ví trước khi gọi API mua hàng.</p>'
+            '<h2>Lưu ý bảo mật</h2><ul><li>Không chia sẻ API key cho người khác.</li>'
+            '<li>Nếu lộ key, vào bot → 🔗 API → 🔄 Tạo key mới.</li>'
+            '<li>API mua hàng sẽ trừ ví ngay và giao hàng nếu đủ tiền/tồn kho.</li></ul>'
+            '</div></div></body></html>'
+        )
+        return guide
+
+    def _api_products(self) -> None:
+        user = self._api_user()
+        if not user:
+            self._send_json({"ok": False, "error": "invalid_api_key"}, status=401)
+            return
+        rows = CatalogService(self.service.db).list_products()
+        products = []
+        for p in rows:
+            products.append({
+                "id": int(p["id"]),
+                "category_id": p.get("category_id"),
+                "category_name": p.get("category_name"),
+                "name": p["name"],
+                "description": p.get("description") or "",
+                "currency": p["currency"],
+                "price_minor": int(p["price_minor"]),
+                "price_display": fmt_money(int(p["price_minor"]), p["currency"]),
+                "available_stock": int(p.get("available_stock") or 0),
+                "is_available": int(p.get("available_stock") or 0) > 0,
+            })
+        self._send_json({"ok": True, "products": products})
+
+    def _api_purchase(self) -> None:
+        user = self._api_user()
+        if not user:
+            self._send_json({"ok": False, "error": "invalid_api_key"}, status=401)
+            return
+        try:
+            payload = self._read_json_body()
+            product_id = int(payload.get("product_id") or 0)
+            quantity = int(payload.get("quantity") or 1)
+            if product_id <= 0 or quantity <= 0:
+                raise ValueError("product_id and quantity must be positive")
+            product = self.service.get_product(product_id)
+            if not int(product.get("is_active") or 0):
+                raise ValueError("product is inactive")
+            available = int(product.get("available_stock") or 0)
+            if quantity > available:
+                self._send_json({"ok": False, "error": "out_of_stock", "available_stock": available}, status=409)
+                return
+            total = int(product["price_minor"]) * quantity
+            balances = WalletService(self.service.db).get_balances(int(user["id"]))
+            balance = int(balances.get(product["currency"], 0))
+            if balance < total:
+                self._send_json({"ok": False, "error": "insufficient_balance", "currency": product["currency"], "required_minor": total, "balance_minor": balance}, status=402)
+                return
+            order_service = OrderService(self.service.db)
+            order = order_service.create_order(user_id=int(user["id"]), product_id=product_id, quantity=quantity)
+            result = order_service.pay_with_wallet(int(order["id"]), expected_user_id=int(user["id"]))
+            delivery = [str(r["delivered_content"]) for r in result.get("delivery") or []]
+            self._send_json({
+                "ok": True,
+                "order": {
+                    "id": int(result["order"]["id"]),
+                    "public_code": result["order"]["public_code"],
+                    "status": result["order"]["status"],
+                    "product_id": product_id,
+                    "product_name": result["order"]["product_name"],
+                    "quantity": quantity,
+                    "currency": result["order"]["currency"],
+                    "total_amount_minor": int(result["order"]["total_amount_minor"]),
+                    "total_display": fmt_money(int(result["order"]["total_amount_minor"]), result["order"]["currency"]),
+                },
+                "delivery": delivery,
+            })
+        except InsufficientFunds:
+            self._send_json({"ok": False, "error": "insufficient_balance"}, status=402)
+        except OutOfStock:
+            self._send_json({"ok": False, "error": "out_of_stock"}, status=409)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path in {"/t/api-guide", "/api-guide"}:
+            self._send(self._api_guide())
+            return
+        if parsed.path == "/api/telegram-buyer/products":
+            self._api_products()
+            return
         if parsed.query:
             query = parse_qs(parsed.query)
             cookies = []
@@ -307,7 +431,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                 cookies.append(f"nimo_theme={query['theme'][0]}; Path=/; SameSite=Lax")
             if "lang" in query:
                 cookies.append(f"nimo_lang={query['lang'][0]}; Path=/; SameSite=Lax")
-            if cookies and parsed.path in {"/", "/orders", "/products", "/categories", "/stock", "/users", "/wallets", "/finance", "/payments", "/settings", "/audit", "/logs", "/bots", "/notifications", "/backup", "/guide", "/status", "/imports", "/exports", "/reconcile", "/coupons", "/roles", "/deliveries", "/low-stock"}:
+            if cookies and parsed.path in {"/", "/orders", "/products", "/categories", "/stock", "/users", "/wallets", "/finance", "/payments", "/preorders", "/settings", "/audit", "/logs", "/bots", "/notifications", "/backup", "/guide", "/status", "/imports", "/exports", "/reconcile", "/coupons", "/roles", "/deliveries", "/low-stock"}:
                 self._redirect(parsed.path, cookies)
                 return
         if parsed.path == "/static/style.css":
@@ -358,6 +482,9 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/telegram-buyer/purchase":
+            self._api_purchase()
+            return
         if parsed.path in {"/webhook/sepay", "/webhook/binance"}:
             length = int(self.headers.get("Content-Length", "0") or 0)
             raw = self.rfile.read(length).decode("utf-8") if length else ""
@@ -412,6 +539,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return self._page("stock", self._stock(query), active="/stock")
         if path == "/orders":
             return self._page("orders", self._orders(query), active="/orders")
+        if path == "/preorders":
+            return self._page("preorders", self._preorders(query), active="/preorders")
         if path == "/users":
             return self._page("users", self._users(), active="/users")
         if path == "/wallets":
@@ -455,11 +584,17 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
 
     def _route_post(self, path: str, form: dict[str, str], admin_id: int) -> str:
         if path == "/categories/create":
-            self.service.create_category(form.get("name", ""), int(form.get("sort_order") or 100), admin_id=admin_id)
+            self.service.create_category(form.get("name", ""), int(form.get("sort_order") or 100), category_icon=form.get("category_icon", "📁"), admin_id=admin_id)
             return "/categories"
         if path == "/categories/update":
-            self.service.update_category(int(form["id"]), name=form.get("name", ""), sort_order=int(form.get("sort_order") or 100), is_active=form.get("is_active") == "on", admin_id=admin_id)
+            self.service.update_category(int(form["id"]), name=form.get("name", ""), category_icon=form.get("category_icon", "📁"), sort_order=int(form.get("sort_order") or 100), is_active=form.get("is_active") == "on", admin_id=admin_id)
             return "/categories"
+        if path == "/preorders/cancel":
+            self.service.cancel_preorder(int(form["preorder_id"]), admin_id=admin_id)
+            return "/preorders"
+        if path == "/preorders/fulfill":
+            self.service.fulfill_preorder(int(form["preorder_id"]), admin_id=admin_id)
+            return "/preorders"
         if path == "/products/create":
             product_id = self.service.create_product(form, admin_id=admin_id)
             image_bytes = form.get("product_image_bytes")
@@ -568,10 +703,10 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
     def _categories(self) -> str:
         rows = self.service.list_categories()
         table_rows = "".join(
-            f'<tr><form method="post" action="/categories/update">{self._form_csrf()}<input type="hidden" name="id" value="{r["id"]}"><td>{r["id"]}</td><td><input name="name" value="{esc(r["name"])}"></td><td><input name="sort_order" value="{r["sort_order"]}"></td><td><input type="checkbox" name="is_active" {"checked" if r["is_active"] else ""}></td><td><button class="small">Lưu</button></td></form></tr>'
+            f'<tr><form method="post" action="/categories/update">{self._form_csrf()}<input type="hidden" name="id" value="{r["id"]}"><td>{r["id"]}</td><td><input name="category_icon" value="{esc(r.get("category_icon") or "📁")}" placeholder="🤖" style="max-width:90px"></td><td><input name="name" value="{esc(r["name"])}"><div class="help">Bot sẽ hiện: {esc(r.get("category_icon") or "📁")} {esc(r["name"])} · còn {int(r.get("available_stock") or 0)}</div></td><td><input name="sort_order" value="{r["sort_order"]}"></td><td><span class="pill">Còn {int(r.get("available_stock") or 0)}</span><br><span class="muted">SP: {int(r.get("active_products") or 0)}</span></td><td><input type="checkbox" name="is_active" {"checked" if r["is_active"] else ""}></td><td><button class="small">Lưu</button></td></form></tr>'
             for r in rows
         )
-        return f'<div class="card"><h3>Tạo danh mục</h3><p class="muted">Danh mục giúp khách chọn nhóm sản phẩm như ChatGPT, Gemini, Canva, CapCut.</p><form method="post" action="/categories/create" class="form-grid">{self._form_csrf()}<label>Tên danh mục<input name="name" placeholder="Ví dụ: ChatGPT" required></label><label>Thứ tự hiển thị<input name="sort_order" value="100"></label><button>{tr(self._theme_lang()[0],"create")}</button></form></div><div class="card table-wrap"><table class="premium-table"><tr><th>ID</th><th>Tên</th><th>Thứ tự</th><th>Đang bật</th><th></th></tr>{table_rows}</table></div>'
+        return f'<div class="card"><h3>Tạo danh mục</h3><p class="muted">Danh mục giúp khách chọn nhóm sản phẩm như ChatGPT, Gemini, Canva, CapCut. Icon hiển thị ngoài bot; trạng thái xanh/đỏ sẽ tự theo tồn kho.</p><form method="post" action="/categories/create" class="form-grid">{self._form_csrf()}<label>Icon danh mục<input name="category_icon" value="📁" placeholder="🤖 / ▶️ / 🟣"></label><label>Tên danh mục<input name="name" placeholder="Ví dụ: ChatGPT" required></label><label>Thứ tự hiển thị<input name="sort_order" value="100"></label><button>{tr(self._theme_lang()[0],"create")}</button></form></div><div class="card table-wrap"><table class="premium-table"><tr><th>ID</th><th>Icon</th><th>Tên</th><th>Thứ tự</th><th>Kho</th><th>Đang bật</th><th></th></tr>{table_rows}</table></div>'
 
     def _category_options(self, current: Any = "") -> str:
         categories = self.service.list_categories()
@@ -726,6 +861,29 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         status = query.get("status", [""])[0] or None
         filters = '<div class="toolbar"><a class="btn secondary small" href="/orders">Tất cả</a><a class="btn secondary small" href="/orders?status=awaiting_payment">Chờ thanh toán</a><a class="btn secondary small" href="/orders?status=delivered">Đã giao</a><a class="btn secondary small" href="/orders?status=cancelled">Đã hủy</a><a class="btn secondary small" href="/orders?status=refunded">Đã hoàn tiền</a></div>'
         return '<div class="card">' + filters + self._orders_table(self.service.list_orders(status=status, limit=200)) + '</div>'
+
+    def _preorders(self, query: dict[str, list[str]]) -> str:
+        status = query.get("status", [""])[0] or None
+        filters = '<div class="toolbar"><a class="btn secondary small" href="/preorders">Tất cả</a><a class="btn secondary small" href="/preorders?status=awaiting_deposit">Chờ cọc</a><a class="btn secondary small" href="/preorders?status=active">Đang đặt</a><a class="btn secondary small" href="/preorders?status=fulfilled">Đã xử lý</a><a class="btn secondary small" href="/preorders?status=cancelled">Đã hủy</a></div>'
+        rows = []
+        for pr in self.service.list_preorders(status=status, limit=300):
+            actions = ''
+            if pr["status"] in {"awaiting_deposit", "active"}:
+                actions = (
+                    f'<div class="action-row"><form method="post" action="/preorders/fulfill">{self._form_csrf()}'
+                    f'<input type="hidden" name="preorder_id" value="{pr["id"]}"><button class="small secondary">Đánh dấu đã xử lý</button></form>'
+                    f'<form method="post" action="/preorders/cancel" onsubmit="return confirm(\'Hủy đơn đặt trước này?\');">{self._form_csrf()}'
+                    f'<input type="hidden" name="preorder_id" value="{pr["id"]}"><button class="small danger">Hủy</button></form></div>'
+                )
+            rows.append(
+                f'<tr><td>#{pr["id"]}<br><code>{esc(pr["public_code"])}</code></td>'
+                f'<td>{esc(pr.get("username") or pr.get("telegram_id"))}</td>'
+                f'<td>{esc(pr["product_name"])}<br><span class="muted">SL: {int(pr["quantity"])} · Cọc {int(pr["deposit_percent"])}%</span></td>'
+                f'<td>{money(pr["deposit_amount_minor"], pr["currency"])}<br><span class="muted">Tổng dự kiến: {money(pr["total_amount_minor"], pr["currency"])}</span></td>'
+                f'<td>{status_badge(pr["status"])}</td><td>{esc(pr["created_at"])}</td><td>{actions}</td></tr>'
+            )
+        empty = '<tr><td colspan="7"><div class="alert">Chưa có đơn đặt trước.</div></td></tr>' if not rows else ''
+        return '<div class="card"><div class="section-head"><div><h2>🧾 Đơn đặt trước</h2><p class="muted">Khách đặt trước khi sản phẩm hết hàng. Phí đặt trước chỉnh tại Cấu hình → Giao hàng cho khách → Phí đặt trước (%).</p></div></div>' + filters + '</div><div class="card table-wrap"><table class="premium-table"><tr><th>Mã</th><th>Khách</th><th>Sản phẩm</th><th>Tiền cọc</th><th>Trạng thái</th><th>Ngày</th><th>Thao tác</th></tr>' + empty + ''.join(rows) + '</table></div>'
 
     def _users(self) -> str:
         rows = "".join(f'<tr><td>{u["id"]}</td><td>{esc(u["telegram_id"])}</td><td>@{esc(u["username"] or "")}</td><td>{esc(u["full_name"] or "")}</td><td>{u["order_count"]}</td><td>{money(u["spent_minor"], "VND")}</td><td>{esc(u["created_at"])}</td></tr>' for u in self.service.list_users())

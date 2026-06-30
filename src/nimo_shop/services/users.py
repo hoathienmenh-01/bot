@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import secrets
+
 from nimo_shop.db import Database
 from nimo_shop.bot.i18n import normalize_lang, SUPPORTED_LANGUAGES
 
@@ -54,3 +56,30 @@ class UserService:
             raise ValueError("unsupported language")
         with self.db.transaction() as conn:
             conn.execute("UPDATE users SET language=? WHERE id=?", (language, user_id))
+
+    @staticmethod
+    def new_api_key() -> str:
+        return "tgb_" + secrets.token_hex(32)
+
+    def ensure_api_key(self, user_id: int) -> str:
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT api_key FROM users WHERE id=?", (user_id,)).fetchone()
+            if row and row["api_key"]:
+                return str(row["api_key"])
+            key = self.new_api_key()
+            conn.execute("UPDATE users SET api_key=?, api_key_created_at=CURRENT_TIMESTAMP WHERE id=?", (key, user_id))
+            return key
+
+    def rotate_api_key(self, user_id: int) -> str:
+        key = self.new_api_key()
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE users SET api_key=?, api_key_created_at=CURRENT_TIMESTAMP WHERE id=?", (key, user_id))
+        return key
+
+    def find_by_api_key(self, api_key: str) -> dict | None:
+        key = (api_key or "").strip()
+        if not key:
+            return None
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM users WHERE api_key=? AND is_banned=0", (key,)).fetchone()
+            return dict(row) if row else None

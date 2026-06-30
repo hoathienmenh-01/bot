@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from nimo_shop.db import Database
 from nimo_shop.money import normalize_currency
 
@@ -8,11 +10,12 @@ class CatalogService:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def add_category(self, name: str, sort_order: int = 100) -> int:
+    def add_category(self, name: str, sort_order: int = 100, category_icon: str = "📁") -> int:
         if not name.strip():
             raise ValueError("category name is required")
+        icon = (category_icon or "📁").strip() or "📁"
         with self.db.transaction() as conn:
-            cur = conn.execute("INSERT INTO categories(name, sort_order) VALUES(?,?)", (name.strip(), sort_order))
+            cur = conn.execute("INSERT INTO categories(name, category_icon, sort_order) VALUES(?,?,?)", (name.strip(), icon, sort_order))
             return int(cur.lastrowid)
 
     def add_product(
@@ -51,33 +54,59 @@ class CatalogService:
             )
             return int(c.lastrowid)
 
-    def add_stock(self, product_id: int, contents: list[str]) -> int:
-        # Stock is money-sensitive: do not silently skip duplicate keys/accounts.
-        # If admin pasted a duplicate line, fail fast with a clear error so they
-        # can fix the inventory input instead of assuming every line was imported.
+    def add_stock(self, product_id: int, contents: list[str], *, duplicate_policy: str | None = None) -> int:
+        """Add inventory rows for a product.
+
+        duplicate_policy:
+        - allow: import every non-empty line, including duplicates. Useful for
+          shops where identical account templates/links are intentional.
+        - skip: silently import only new rows for this product.
+        - reject: fail if input or existing stock contains duplicate content.
+
+        Default comes from STOCK_DUPLICATE_POLICY and is now `allow` because the
+        admin may sell diverse goods whose raw lines can intentionally repeat.
+        """
         clean = [x.strip() for x in contents if x and x.strip()]
         if not clean:
             raise ValueError("stock content is required")
-        seen: set[str] = set()
-        duplicates_in_input: list[str] = []
-        for item in clean:
-            if item in seen and item not in duplicates_in_input:
-                duplicates_in_input.append(item)
-            seen.add(item)
-        if duplicates_in_input:
-            sample = ", ".join(duplicates_in_input[:3])
-            raise ValueError(f"Dòng nhập kho bị trùng trong cùng sản phẩm: {sample}. Hãy xóa/sửa dòng trùng rồi nhập lại.")
+        policy = (duplicate_policy or os.getenv("STOCK_DUPLICATE_POLICY", "allow")).strip().lower()
+        if policy not in {"allow", "skip", "reject"}:
+            policy = "allow"
+        if policy in {"reject", "skip"}:
+            seen: set[str] = set()
+            duplicates_in_input: list[str] = []
+            deduped: list[str] = []
+            for item in clean:
+                if item in seen:
+                    if item not in duplicates_in_input:
+                        duplicates_in_input.append(item)
+                    continue
+                seen.add(item)
+                deduped.append(item)
+            if policy == "reject" and duplicates_in_input:
+                sample = ", ".join(duplicates_in_input[:3])
+                raise ValueError(f"Dòng nhập kho bị trùng trong cùng sản phẩm: {sample}. Hãy xóa/sửa dòng trùng rồi nhập lại.")
+            if policy == "skip":
+                clean = deduped
+                if not clean:
+                    return 0
         with self.db.transaction() as conn:
-            existing = [
-                str(r["content"])
-                for r in conn.execute(
-                    "SELECT content FROM stock_items WHERE product_id=? AND content IN (%s)" % ",".join("?" for _ in clean),
-                    [product_id, *clean],
-                ).fetchall()
-            ] if clean else []
-            if existing:
-                sample = ", ".join(existing[:3])
-                raise ValueError(f"Kho đã có dòng trùng trong sản phẩm này: {sample}. Không nhập bỏ qua im lặng để tránh bán trùng key/tài khoản.")
+            if policy in {"reject", "skip"}:
+                existing = [
+                    str(r["content"])
+                    for r in conn.execute(
+                        "SELECT content FROM stock_items WHERE product_id=? AND content IN (%s)" % ",".join("?" for _ in clean),
+                        [product_id, *clean],
+                    ).fetchall()
+                ] if clean else []
+                if policy == "reject" and existing:
+                    sample = ", ".join(existing[:3])
+                    raise ValueError(f"Kho đã có dòng trùng trong sản phẩm này: {sample}. Không nhập bỏ qua im lặng để tránh bán trùng key/tài khoản.")
+                if policy == "skip" and existing:
+                    existing_set = set(existing)
+                    clean = [x for x in clean if x not in existing_set]
+                    if not clean:
+                        return 0
             before = conn.total_changes
             conn.executemany(
                 "INSERT INTO stock_items(product_id, content, status) VALUES(?,?, 'available')",
@@ -87,7 +116,19 @@ class CatalogService:
 
     def list_categories(self) -> list[dict]:
         with self.db.connect() as conn:
-            return [dict(r) for r in conn.execute("SELECT * FROM categories WHERE is_active=1 ORDER BY sort_order, id")]
+            return [dict(r) for r in conn.execute(
+                """
+                SELECT c.*,
+                       COALESCE(SUM(CASE WHEN p.is_active=1 AND s.status='available' THEN 1 ELSE 0 END),0) AS available_stock,
+                       COALESCE(COUNT(DISTINCT CASE WHEN p.is_active=1 THEN p.id END),0) AS active_products
+                  FROM categories c
+                  LEFT JOIN products p ON p.category_id=c.id
+                  LEFT JOIN stock_items s ON s.product_id=p.id
+                 WHERE c.is_active=1
+                 GROUP BY c.id
+                 ORDER BY c.sort_order, c.id
+                """
+            )]
 
     def list_products(self, category_id: int | None = None) -> list[dict]:
         sql = """
@@ -100,7 +141,7 @@ class CatalogService:
         if category_id is not None:
             sql += " AND p.category_id=?"
             params.append(category_id)
-        sql += " GROUP BY p.id ORDER BY p.id DESC"
+        sql += " GROUP BY p.id ORDER BY COALESCE(p.category_id, 999999), p.id ASC"
         with self.db.connect() as conn:
             return [dict(r) for r in conn.execute(sql, params)]
 
