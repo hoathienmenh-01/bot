@@ -1,60 +1,50 @@
-# Test Report - NIMO Telegram Shop Bot 1.3.0
+# TEST REPORT - NIMO Shop v1.4.0 Web Admin
 
-## Commands executed
+Ngày kiểm thử: 2026-06-30
+
+## Lệnh đã chạy
 
 ```bash
 ./scripts/run_full_tests.sh
 ```
 
-Equivalent manual commands:
+Script thực hiện:
 
 ```bash
-PYTHONPATH=src python3 -W error::ResourceWarning -m unittest discover -s tests -v
-PYTHONPATH=src python3 -m compileall -q src tests
-DATABASE_PATH=$(mktemp -d)/shop.db PYTHONPATH=src python3 -m nimo_shop.seed_demo
-DATABASE_PATH=$(mktemp -d)/shop.db PYTHONPATH=src python3 -m nimo_shop.audit
+PYTHONPATH=src python -W error::ResourceWarning -m unittest discover -s tests -v
+PYTHONPATH=src python -m compileall -q src tests
+DATABASE_PATH=$(mktemp -d)/shop.db PYTHONPATH=src python -m nimo_shop.seed_demo
+DATABASE_PATH=$(mktemp -d)/shop.db PYTHONPATH=src python -m nimo_shop.audit
 ```
 
-## Result
+## Kết quả
 
-- Unit tests: 40/40 passed
-- ResourceWarning check: passed
-- Compile check: passed
-- Demo seed smoke check: passed
-- Audit smoke check: passed
+```text
+Ran 43 tests in 1.564s
+OK
+Seeded demo categories/products/stock.
+AUDIT OK: no consistency issues found
+FULL TEST OK
+```
 
-## Additional fixes in 1.3.0
+## Nhóm test mới trong v1.4
 
-- User ownership guard: a customer cannot pay, cancel, or create a payment intent for another customer's order.
-- Sold stock cleanup: delivery clears stale reservation fields for cleaner stock audit.
-- AuditService added: checks wallet-vs-ledger drift, reserved-stock mismatch, delivered-order delivery count, sold-stock delivery links, stale available stock references, and cash ledger/event linkage.
-- Admin `/audit`, `/orders`, `/finance`, `/stock`, `/users` commands added.
-- Binance Pay create-order flow is called from the Telegram payment button when merchant credentials are configured.
-- `scripts/run_full_tests.sh` added for one-command regression testing.
+- `test_password_hash_session_and_csrf_are_enforced`
+- `test_service_manages_products_stock_settings_wallet_and_payment`
+- `test_http_admin_login_csrf_forms_and_pages`
 
-## Coverage focus
+## Phạm vi đã test
 
-- Wallet credit/debit validation and idempotency
-- Negative/zero amount rejection
-- Order reserve/delivery/cancel/expiry
-- Stock oversell and duplicate stock prevention
-- Provider payment idempotency by provider_tx_id
-- Underpayment, overpayment, late payment, cancelled/expired order payment
-- Duplicate payment to already-confirmed intent
-- Refund-to-wallet idempotency
-- External event audit for unmatched payment codes
-- User ownership enforcement for order actions
-- Data consistency audit checks
-- Binance Pay v3 payload/signature/create-order helper
-- SePay/VietQR helper
-- Settings parsing
-- Admin command parsers
-- Customer/admin text rendering
-- SePay transaction normalization and idempotent application
-- Demo seed script smoke test
-
-## Not live-tested here
-
-- Real Telegram BotFather token polling was not run in this sandbox because no live token was provided.
-- Real SePay/Binance network calls were not executed with live credentials.
-- Binance webhook receiver still requires a public HTTPS endpoint in production.
+- Web Admin login bằng password hash PBKDF2.
+- Session signed cookie.
+- CSRF token cho form POST.
+- Dashboard chạy sau login.
+- Tạo danh mục qua web.
+- Tạo sản phẩm qua web.
+- Nhập kho qua web.
+- Cộng ví thủ công qua web service.
+- Xác nhận thanh toán thủ công qua web service và giao đơn.
+- Cập nhật settings, ghi `.env`.
+- Light/Dark + VI/EN toggle ở HTTP layer.
+- Audit không báo lỗi sau luồng web.
+- Toàn bộ 40 test lõi cũ vẫn pass.

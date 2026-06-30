@@ -1,16 +1,17 @@
 # NIMO Telegram Shop Bot Complete
 
-Bot bán hàng Telegram cho sản phẩm số: tài khoản, key, license, gói premium. Bản này được dựng lại sạch, tập trung vào an toàn tiền/kho/đơn và đã hoàn thiện thêm flow Telegram để có thể chạy thử bot thật sau khi cấu hình token.
+Bot bán hàng Telegram cho sản phẩm số: tài khoản, key, license, gói premium. Bản này tập trung vào an toàn tiền/kho/đơn và đã bổ sung **Web Admin hiện đại** để quản lý bằng trình duyệt, không cần sửa file trực tiếp trên điện thoại.
 
 ## Trạng thái bản này
 
-- Phiên bản: `1.3.0`
+- Phiên bản: `1.4.0-web-admin`
 - Core ví/đơn/kho/payment: hoàn thiện ở mức MVP dùng thật cẩn thận.
-- Telegram UI: đã có flow khách hàng và admin cơ bản bằng aiogram 3.
-- Test: `40/40 passed`.
-- Đã bổ sung audit dữ liệu, khóa thao tác order theo đúng chủ sở hữu user, và Binance Pay merchant create-order flow khi cấu hình API key. Webhook public HTTPS cho Binance vẫn cần triển khai trên domain/HTTPS thật nếu muốn auto callback production.
+- Telegram UI: flow khách hàng và admin cơ bản bằng aiogram 3.
+- Web Admin: quản lý dashboard, đơn hàng, sản phẩm, danh mục, kho, user, ví, dòng tiền, payment, cấu hình, audit, log admin.
+- Giao diện web: responsive, light/dark mode, tiếng Việt/English.
+- Test: `43/43 passed`.
 
-## Chức năng khách hàng
+## Chức năng khách hàng Telegram
 
 Menu `/start`:
 
@@ -25,7 +26,7 @@ Flow mua hàng:
 
 ```text
 /start
-→ 🛒 Mua ngay
+→ Mua ngay
 → chọn danh mục
 → chọn sản phẩm
 → xem giá / mô tả / tồn kho / bảo hành
@@ -35,27 +36,128 @@ Flow mua hàng:
 → nếu thanh toán thành công, bot giao key/tài khoản
 ```
 
-Ví:
+## Web Admin
 
-- Xem số dư `VND`, `USDT`, `USD`.
-- Nạp ví theo mức nhanh: 50k, 100k, 200k, 500k.
-- Nạp qua ngân hàng tạo mã thanh toán + nội dung chuyển khoản + VietQR URL.
-- Khi SePay polling nhận giao dịch đúng mã, bot tự cộng ví hoặc giao hàng.
+Chạy web admin:
 
-## Chức năng admin Telegram
+```bash
+PYTHONPATH=src python -m nimo_shop.web.main --host 0.0.0.0 --port 8080
+```
 
-Menu `/admin`:
-
-- 📦 Đơn chờ duyệt
-- 💵 Dòng tiền
-- ➕ Thêm sản phẩm
-- 📥 Nhập kho
-- 👥 Khách hàng
-- 📊 Thống kê
-
-Lệnh admin:
+Mở trên máy tính cùng WiFi:
 
 ```text
+http://IP_DIEN_THOAI:8080
+```
+
+Đăng nhập mặc định nếu chưa đặt env:
+
+```text
+admin / admin12345
+```
+
+Khuyến nghị đặt trong `.env` trước khi chạy thật:
+
+```env
+WEB_ADMIN_USERNAME=admin
+WEB_ADMIN_PASSWORD=mat_khau_manh_cua_ban
+WEB_SESSION_SECRET=chuoi_ngau_nhien_rat_dai
+```
+
+Web Admin có các trang:
+
+- Dashboard: tổng quan shop, đơn gần đây, audit nhanh.
+- Đơn hàng: xem, hủy, refund.
+- Sản phẩm: thêm/sửa sản phẩm, giá bán, giá vốn, mô tả, bảo hành, bật/tắt.
+- Danh mục: thêm/sửa/bật/tắt danh mục.
+- Kho hàng: nhập key/account nhiều dòng, xem available/reserved/sold.
+- Người dùng: xem user Telegram, số đơn, tổng đã mua.
+- Ví: xem số dư, cộng/trừ ví thủ công có log.
+- Dòng tiền: cash ledger, doanh thu, giá vốn, lãi gộp, nợ ví khách.
+- Thanh toán: xem payment intent, provider event, xác nhận thanh toán thủ công.
+- Cấu hình: sửa bank/SePay/Binance/Bot/Web settings, có tùy chọn ghi ra `.env`.
+- Audit: kiểm tra lệch ví/ledger, kho/đơn/giao hàng/dòng tiền.
+- Log admin: xem thao tác admin.
+
+## Chạy bot + web admin trên Termux
+
+Cài môi trường:
+
+```bash
+pkg update && pkg upgrade -y
+pkg install python git nano unzip tmux openssh cronie -y
+```
+
+Tải code:
+
+```bash
+git clone https://github.com/hoathienmenh-01/bot.git
+cd bot
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+nano .env
+```
+
+Chạy test:
+
+```bash
+chmod +x scripts/run_full_tests.sh
+./scripts/run_full_tests.sh
+```
+
+Seed demo:
+
+```bash
+PYTHONPATH=src python -m nimo_shop.seed_demo
+```
+
+Chạy bot:
+
+```bash
+PYTHONPATH=src python -m nimo_shop.main
+```
+
+Chạy web admin ở cửa sổ tmux khác:
+
+```bash
+PYTHONPATH=src python -m nimo_shop.web.main --host 0.0.0.0 --port 8080
+```
+
+## Chạy bot và web bằng tmux
+
+```bash
+tmux new -s nimo
+cd ~/bot
+source .venv/bin/activate
+PYTHONPATH=src python -m nimo_shop.main
+```
+
+Tạo cửa sổ mới:
+
+```text
+Ctrl+B rồi bấm C
+```
+
+Chạy web:
+
+```bash
+cd ~/bot
+source .venv/bin/activate
+PYTHONPATH=src python -m nimo_shop.web.main --host 0.0.0.0 --port 8080
+```
+
+Thoát mà vẫn chạy:
+
+```text
+Ctrl+B rồi bấm D
+```
+
+## Quản lý bằng Telegram Admin
+
+```text
+/admin
 /newcategory Tên danh mục
 /addproduct category_id | tên | giá_vnd | giá_vốn_vnd | mô tả | bảo hành
 /addstock product_id
@@ -70,22 +172,6 @@ key2
 /finance
 /stock
 /users
-```
-
-Ví dụ:
-
-```text
-/newcategory ChatGPT
-/addproduct 1 | ChatGPT Plus 1 tháng | 150000 | 100000 | Tài khoản dùng 30 ngày | 1 đổi 1 trong thời hạn bảo hành
-/addstock 1
-email1@example.com|pass1
-email2@example.com|pass2
-```
-
-Manual confirm dùng khi API ngân hàng/Binance chưa tự nhận được tiền:
-
-```text
-/confirm ORDABCDEF12 TXBANK123 150000 VND bank
 ```
 
 ## Quản lý dòng tiền
@@ -120,58 +206,11 @@ Admin xem được:
 
 ### Binance Pay
 
-- Có helper tạo payload Binance Pay v3 `/binancepay/openapi/v3/order` và bot sẽ gọi create-order khi `BINANCE_PAY_ENABLED=true` cùng API key/secret.
+- Có helper tạo payload Binance Pay v3 `/binancepay/openapi/v3/order` và bot gọi create-order khi `BINANCE_PAY_ENABLED=true` cùng API key/secret.
 - Có helper ký request create-order và lưu `provider_ref` từ Binance response vào payment intent.
-- Chưa dựng HTTP webhook server public trong package này; nếu dùng production Binance Pay merchant, cần domain HTTPS để nhận callback, verify chữ ký theo tài liệu Binance, rồi gọi `PaymentService.confirm_provider_transaction()` hoặc dùng `/confirm` dự phòng.
+- Nếu dùng production Binance Pay merchant, cần domain HTTPS để nhận callback/webhook và verify chữ ký trước khi xác nhận giao dịch.
 
-## Kho hàng
-
-Stock có 3 trạng thái:
-
-- `available`
-- `reserved`
-- `sold`
-
-Khi tạo đơn, bot giữ hàng tạm bằng `reserved` và `reserved_until`. Nếu đơn hủy/hết hạn, stock trả về `available`. Khi thanh toán thành công, stock chuyển `sold`, nội dung giao hàng ghi vào `deliveries`.
-
-## Cài đặt
-
-```bash
-cd nimo_telegram_shop_bot_complete
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-nano .env
-```
-
-Cấu hình quan trọng trong `.env`:
-
-```env
-BOT_TOKEN=token_botfather
-ADMIN_IDS=telegram_id_cua_ban
-DATABASE_PATH=data/shop.db
-BANK_ENABLED=true
-SEPAY_API_KEY=...
-BANK_BIN=970436
-BANK_ACCOUNT=...
-BANK_OWNER=...
-SUPPORT_CONTACT=@username_admin
-```
-
-Tạo dữ liệu demo:
-
-```bash
-PYTHONPATH=src python -m nimo_shop.seed_demo
-```
-
-Chạy bot:
-
-```bash
-PYTHONPATH=src python -m nimo_shop.main
-```
-
-Chạy test full:
+## Test full
 
 ```bash
 ./scripts/run_full_tests.sh
@@ -186,14 +225,15 @@ DATABASE_PATH=$(mktemp -d)/shop.db PYTHONPATH=src python -m nimo_shop.seed_demo
 DATABASE_PATH=$(mktemp -d)/shop.db PYTHONPATH=src python -m nimo_shop.audit
 ```
 
-## Kết quả test hiện tại
+Kết quả hiện tại:
 
 ```text
-Ran 40 tests in 0.720s
+Ran 43 tests in 1.5s
 OK
 compileall OK
 seed demo OK
 audit OK
+FULL TEST OK
 ```
 
 Test bao phủ:
@@ -211,29 +251,21 @@ Test bao phủ:
 - chặn user thao tác đơn hàng không thuộc về mình;
 - audit phát hiện lệch ví/ledger và lệch kho/đơn;
 - text rendering khách/admin;
-- SePay transaction normalizer và idempotent apply.
+- SePay transaction normalizer và idempotent apply;
+- Web Admin auth, CSRF, session, dashboard, category/product/stock forms, settings `.env`, wallet adjust và payment confirm.
 
 ## Cấu trúc
 
 ```text
 src/nimo_shop/
 ├── bot/
-│   ├── admin_commands.py
-│   ├── app.py
-│   ├── keyboards.py
-│   └── views.py
 ├── payments/
-│   ├── binance_pay.py
-│   └── sepay.py
 ├── services/
-│   ├── audit.py
-│   ├── catalog.py
-│   ├── finance.py
-│   ├── orders.py
-│   ├── payments.py
-│   ├── provider_sync.py
-│   ├── users.py
-│   └── wallet.py
+├── web/
+│   ├── app.py
+│   ├── main.py
+│   ├── security.py
+│   └── service.py
 ├── config.py
 ├── db.py
 ├── main.py
@@ -244,4 +276,7 @@ src/nimo_shop/
 
 ## Lưu ý trước khi bán thật
 
-Bản này đã chắc hơn ở lõi tiền/kho/đơn, nhưng trước khi nhận tiền thật quy mô lớn bạn vẫn nên chạy thử bằng tài khoản bot riêng, dùng sản phẩm demo, kiểm tra SePay/Binance với giao dịch nhỏ, rồi mới đưa vào vận hành. Không public database hoặc token bot. Nếu triển khai Binance Pay merchant webhook, bắt buộc dùng HTTPS và verify chữ ký webhook trước khi gọi xác nhận giao dịch.
+- Đổi `WEB_ADMIN_PASSWORD`, `WEB_SESSION_SECRET`, `BOT_TOKEN`, `SEPAY_API_KEY` trước khi mở shop.
+- Không public web admin trực tiếp ra internet. Nên dùng LAN/VPN/SSH tunnel.
+- Nếu chạy trên điện thoại Android/Termux, bật `termux-wake-lock`, tắt tối ưu pin, backup `data/shop.db` hằng ngày.
+- Test giao dịch thật nhỏ trước khi nhận tiền lớn.
