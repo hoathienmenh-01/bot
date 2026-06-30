@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from html import escape
+import os
 
 from nimo_shop.money import fmt_money
 from nimo_shop.bot.i18n import SUPPORTED_LANGUAGES, language_display, t, normalize_lang
@@ -143,6 +144,19 @@ DELIVERY_INLINE_LIMIT = 20
 DELIVERY_TEXT_LIMIT = 3300
 
 
+def _delivery_mode() -> str:
+    mode = os.getenv("DELIVERY_OUTPUT_MODE", "auto").strip().lower()
+    return mode if mode in {"auto", "file_only", "inline_and_file"} else "auto"
+
+
+def _delivery_threshold() -> int:
+    try:
+        value = int(os.getenv("DELIVERY_FILE_THRESHOLD", str(DELIVERY_INLINE_LIMIT)))
+    except ValueError:
+        value = DELIVERY_INLINE_LIMIT
+    return max(1, min(value, 1000000))
+
+
 def delivery_file_text(order: dict, delivery_rows: Iterable[dict]) -> str:
     rows = list(delivery_rows)
     lines = [
@@ -165,29 +179,7 @@ def delivery_filename(order: dict) -> str:
     return f"{code}_delivery.txt"
 
 
-def delivery_needs_file(order: dict, delivery_rows: Iterable[dict]) -> bool:
-    rows = list(delivery_rows)
-    if len(rows) > DELIVERY_INLINE_LIMIT:
-        return True
-    return len(delivery(order, rows)) > DELIVERY_TEXT_LIMIT
-
-
-def delivery_file_summary(order: dict, delivery_rows: Iterable[dict]) -> str:
-    rows = list(delivery_rows)
-    return (
-        f"✅ <b>Đã giao hàng cho đơn {h(order['public_code'])}</b>\n\n"
-        f"Sản phẩm: <b>{h(order['product_name'])}</b>\n"
-        f"Số lượng: <b>{len(rows)}</b>\n"
-        f"Tổng tiền: <b>{fmt_money(int(order['total_amount_minor']), order['currency'])}</b>\n\n"
-        "📎 Đơn này có nhiều dòng hàng nên bot đã gửi file TXT để bạn tải xuống và lưu lại. "
-        "Nếu hàng lỗi, gửi mã đơn cho admin để được hỗ trợ."
-    )
-
-
-def delivery(order: dict, delivery_rows: Iterable[dict]) -> str:
-    rows = list(delivery_rows)
-    if len(rows) > DELIVERY_INLINE_LIMIT:
-        return delivery_file_summary(order, rows)
+def _delivery_inline_text(order: dict, rows: list[dict]) -> str:
     lines = [
         f"✅ <b>Đã giao hàng cho đơn {h(order['public_code'])}</b>",
         f"Sản phẩm: <b>{h(order['product_name'])}</b>",
@@ -198,11 +190,44 @@ def delivery(order: dict, delivery_rows: Iterable[dict]) -> str:
     for idx, row in enumerate(rows, start=1):
         lines.append(f"{idx}. <code>{h(row['delivered_content'])}</code>")
     lines.append("\nVui lòng lưu lại thông tin. Nếu hàng lỗi, vào 💬 Hỗ trợ để liên hệ admin.")
-    text = "\n".join(lines)
-    if len(text) > DELIVERY_TEXT_LIMIT:
-        return delivery_file_summary(order, rows)
-    return text
+    return "\n".join(lines)
 
+
+def delivery_needs_file(order: dict, delivery_rows: Iterable[dict]) -> bool:
+    rows = list(delivery_rows)
+    mode = _delivery_mode()
+    if mode in {"file_only", "inline_and_file"}:
+        return True
+    if len(rows) >= _delivery_threshold():
+        return True
+    return len(_delivery_inline_text(order, rows)) > DELIVERY_TEXT_LIMIT
+
+
+def delivery_file_summary(order: dict, delivery_rows: Iterable[dict]) -> str:
+    rows = list(delivery_rows)
+    return (
+        f"✅ <b>Đã giao hàng cho đơn {h(order['public_code'])}</b>\n\n"
+        f"Sản phẩm: <b>{h(order['product_name'])}</b>\n"
+        f"Số lượng: <b>{len(rows)}</b>\n"
+        f"Tổng tiền: <b>{fmt_money(int(order['total_amount_minor']), order['currency'])}</b>\n\n"
+        "📎 Bot đã gửi file TXT để bạn tải xuống và lưu lại. "
+        "Nếu hàng lỗi, gửi mã đơn cho admin để được hỗ trợ."
+    )
+
+
+def delivery(order: dict, delivery_rows: Iterable[dict]) -> str:
+    rows = list(delivery_rows)
+    mode = _delivery_mode()
+    inline = _delivery_inline_text(order, rows)
+    if mode == "file_only":
+        return delivery_file_summary(order, rows)
+    if mode == "inline_and_file":
+        if len(inline) <= DELIVERY_TEXT_LIMIT and len(rows) < _delivery_threshold():
+            return inline + "\n\n📎 Bot cũng gửi kèm file TXT để bạn dễ lưu lại."
+        return delivery_file_summary(order, rows)
+    if len(rows) >= _delivery_threshold() or len(inline) > DELIVERY_TEXT_LIMIT:
+        return delivery_file_summary(order, rows)
+    return inline
 
 def support(admin_contact: str | None = None) -> str:
     contact = f"\n\nAdmin: {h(admin_contact)}" if admin_contact else ""

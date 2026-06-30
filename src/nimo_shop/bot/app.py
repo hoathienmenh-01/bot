@@ -81,6 +81,17 @@ def build_dispatcher(settings: Settings, db: Database):
         except Exception:
             await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
 
+    def log_delivery_download(order: dict, *, user_id: int | None, source: str) -> None:
+        try:
+            with db.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO delivery_download_logs(order_id, user_id, source, filename) VALUES(?,?,?,?)",
+                    (int(order.get("id") or 0) or None, user_id, source, views.delivery_filename(order)),
+                )
+        except Exception:
+            # Delivery must not fail merely because audit logging failed.
+            pass
+
     async def send_delivery_payload(message, order: dict, delivery_rows: list[dict], *, edit_chat_id: int | None = None, edit_message_id: int | None = None) -> None:
         text = views.delivery(order, delivery_rows)
         if edit_chat_id is not None and edit_message_id is not None:
@@ -100,6 +111,7 @@ def build_dispatcher(settings: Settings, db: Database):
                     ),
                     parse_mode="HTML",
                 )
+                log_delivery_download(order, user_id=int(order.get("user_id") or 0) or None, source="bot_auto_delivery")
             except Exception as exc:
                 await message.answer(f"⚠️ Không gửi được file giao hàng: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
@@ -119,6 +131,7 @@ def build_dispatcher(settings: Settings, db: Database):
                     ),
                     parse_mode="HTML",
                 )
+                log_delivery_download(order, user_id=int(order.get("user_id") or 0) or None, source="bot_auto_delivery")
             except Exception as exc:
                 await callback.message.answer(f"⚠️ Không gửi được file giao hàng: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
@@ -385,6 +398,7 @@ def build_dispatcher(settings: Settings, db: Database):
                 data = views.delivery_file_text(order, delivery_rows).encode("utf-8")
                 doc = BufferedInputFile(data, filename=views.delivery_filename(order))
                 await message.answer_document(doc, caption=f"📎 File giao hàng đơn {views.h(order['public_code'])}", parse_mode="HTML")
+                log_delivery_download(order, user_id=user_id, source="bot_manual_download")
             except Exception as exc:
                 await message.answer(f"❌ Không gửi được file: <code>{views.h(exc)}</code>", parse_mode="HTML")
         except Exception as exc:

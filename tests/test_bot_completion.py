@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from nimo_shop.bot.admin_commands import parse_add_product, parse_add_stock, parse_confirm, parse_one_int_arg
@@ -135,6 +137,33 @@ class BotCompletionTest(unittest.TestCase):
         self.assertIn(paid["order"]["public_code"], file_text)
         self.assertIn("bulk-1|secret", file_text)
         self.assertTrue(views.delivery_filename(paid["order"]).endswith("_delivery.txt"))
+
+    def test_delivery_output_mode_can_force_file_for_one_item(self) -> None:
+        order = self.orders.create_order(user_id=self.user_id, product_id=self.product_id)
+        WalletService(self.db).credit(self.user_id, "VND", 150_000, reason="single-file", idempotency_key="single-file-credit")
+        paid = self.orders.pay_with_wallet(order["id"])
+        self.assertEqual(len(paid["delivery"]), 1)
+        with patch.dict(os.environ, {"DELIVERY_OUTPUT_MODE": "auto", "DELIVERY_FILE_THRESHOLD": "20"}, clear=False):
+            self.assertFalse(views.delivery_needs_file(paid["order"], paid["delivery"]))
+            self.assertIn("Thông tin hàng", views.delivery(paid["order"], paid["delivery"]))
+        with patch.dict(os.environ, {"DELIVERY_OUTPUT_MODE": "file_only", "DELIVERY_FILE_THRESHOLD": "20"}, clear=False):
+            self.assertTrue(views.delivery_needs_file(paid["order"], paid["delivery"]))
+            self.assertIn("đã gửi file TXT", views.delivery(paid["order"], paid["delivery"]))
+        with patch.dict(os.environ, {"DELIVERY_OUTPUT_MODE": "inline_and_file", "DELIVERY_FILE_THRESHOLD": "20"}, clear=False):
+            self.assertTrue(views.delivery_needs_file(paid["order"], paid["delivery"]))
+            rendered = views.delivery(paid["order"], paid["delivery"])
+            self.assertIn("Thông tin hàng", rendered)
+            self.assertIn("gửi kèm file TXT", rendered)
+
+    def test_delivery_auto_threshold_is_configurable(self) -> None:
+        self.catalog.add_stock(self.product_id, ["two|pass"] )
+        order = self.orders.create_order(user_id=self.user_id, product_id=self.product_id, quantity=2)
+        WalletService(self.db).credit(self.user_id, "VND", 300_000, reason="threshold", idempotency_key="threshold-credit")
+        paid = self.orders.pay_with_wallet(order["id"])
+        with patch.dict(os.environ, {"DELIVERY_OUTPUT_MODE": "auto", "DELIVERY_FILE_THRESHOLD": "2"}, clear=False):
+            self.assertTrue(views.delivery_needs_file(paid["order"], paid["delivery"]))
+        with patch.dict(os.environ, {"DELIVERY_OUTPUT_MODE": "auto", "DELIVERY_FILE_THRESHOLD": "999"}, clear=False):
+            self.assertFalse(views.delivery_needs_file(paid["order"], paid["delivery"]))
 
     def test_main_inline_keyboard_supports_single_message_navigation(self) -> None:
         markup = str(main_inline_keyboard_rows("vi"))

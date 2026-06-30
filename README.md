@@ -394,3 +394,48 @@ For high-quantity orders, the bot sends a TXT file containing all delivered keys
 ```bash
 PYTHONPATH=src python -m nimo_shop.run_all --host 0.0.0.0 --port 8080
 ```
+
+## Delivery file policy
+
+Web Admin → Cấu hình → Giao hàng cho khách now supports:
+
+- `auto`: small orders are shown directly in chat; large/long orders are sent as TXT files.
+- `file_only`: every delivered order is sent as a TXT file, including quantity 1.
+- `inline_and_file`: small orders are shown in chat and also sent as TXT files.
+
+Environment variables:
+
+```env
+DELIVERY_OUTPUT_MODE=auto
+DELIVERY_FILE_THRESHOLD=20
+```
+
+Use `file_only` if you want all customers to download a file for easier saving and cleaner chats.
+
+## v2.1 Operations Center
+
+New Web Admin pages:
+
+- **Trạng thái**: check database, token format, SePay/Bank, Binance and low-stock overview.
+- **Nhập/Xuất**: import products/categories/stock by CSV.
+- **Báo cáo**: download CSV reports for orders, products, stock, wallets, finance and users.
+- **Đối soát**: review unmatched payment events and mark them reviewed.
+- **Mã giảm giá**: create/edit/delete coupon codes.
+- **Phân quyền**: create admin accounts with roles: owner, finance, stock, support, viewer.
+- **Lịch sử giao hàng**: track generated/downloaded order delivery files.
+- **Cảnh báo kho**: view low-stock products and queue low-stock notifications.
+
+Webhook endpoints added:
+
+```text
+POST /webhook/sepay
+POST /webhook/binance
+```
+
+Supported request fields: `tx_id` / `transaction_id`, `amount`, `currency`, `description` / `content` / `note`. Unmatched or malformed payments are saved for reconciliation.
+
+Run everything:
+
+```bash
+PYTHONPATH=src python -m nimo_shop.run_all --host 0.0.0.0 --port 8080
+```

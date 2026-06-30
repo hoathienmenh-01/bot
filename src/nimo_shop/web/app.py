@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -18,7 +19,7 @@ LANG = {
     "vi": {
         "dashboard": "Tổng quan", "orders": "Đơn hàng", "products": "Sản phẩm", "categories": "Danh mục",
         "stock": "Kho hàng", "users": "Người dùng", "wallets": "Ví", "finance": "Dòng tiền",
-        "payments": "Thanh toán", "settings": "Cấu hình", "audit": "Kiểm tra hệ thống", "logs": "Nhật ký admin", "bots": "Quản lý bot", "notifications": "Thông báo bot", "backup": "Backup dữ liệu", "guide": "Hướng dẫn",
+        "payments": "Thanh toán", "settings": "Cấu hình", "audit": "Kiểm tra hệ thống", "logs": "Nhật ký admin", "bots": "Quản lý bot", "notifications": "Thông báo bot", "backup": "Backup dữ liệu", "guide": "Hướng dẫn", "status": "Trạng thái", "imports": "Nhập/Xuất", "exports": "Báo cáo", "reconcile": "Đối soát", "coupons": "Mã giảm giá", "roles": "Phân quyền", "deliveries": "Lịch sử giao hàng", "low_stock": "Cảnh báo kho",
         "login": "Đăng nhập", "logout": "Đăng xuất", "save": "Lưu thay đổi", "create": "Tạo mới",
         "import_stock": "Nhập kho", "confirm_payment": "Xác nhận thanh toán", "light": "Sáng", "dark": "Tối",
         "language": "Ngôn ngữ", "theme": "Giao diện", "welcome": "Trang quản lý NIMO Shop",
@@ -28,7 +29,7 @@ LANG = {
     "en": {
         "dashboard": "Dashboard", "orders": "Orders", "products": "Products", "categories": "Categories",
         "stock": "Inventory", "users": "Users", "wallets": "Wallets", "finance": "Finance",
-        "payments": "Payments", "settings": "Settings", "audit": "System Audit", "logs": "Admin Logs", "bots": "Bot Manager", "notifications": "Bot Notifications", "backup": "Data Backup", "guide": "Guide",
+        "payments": "Payments", "settings": "Settings", "audit": "System Audit", "logs": "Admin Logs", "bots": "Bot Manager", "notifications": "Bot Notifications", "backup": "Data Backup", "guide": "Guide", "status": "Status", "imports": "Import/Export", "exports": "Reports", "reconcile": "Reconciliation", "coupons": "Coupons", "roles": "Roles", "deliveries": "Delivery Logs", "low_stock": "Low Stock",
         "login": "Login", "logout": "Logout", "save": "Save changes", "create": "Create",
         "import_stock": "Import stock", "confirm_payment": "Confirm payment", "light": "Light", "dark": "Dark",
         "language": "Language", "theme": "Theme", "welcome": "NIMO Shop Admin",
@@ -40,8 +41,9 @@ LANG = {
 NAV = [
     ("/", "dashboard"), ("/orders", "orders"), ("/products", "products"), ("/categories", "categories"),
     ("/stock", "stock"), ("/users", "users"), ("/wallets", "wallets"), ("/finance", "finance"),
-    ("/payments", "payments"), ("/bots", "bots"), ("/notifications", "notifications"),
-    ("/backup", "backup"), ("/settings", "settings"), ("/guide", "guide"), ("/audit", "audit"), ("/logs", "logs"),
+    ("/payments", "payments"), ("/reconcile", "reconcile"), ("/bots", "bots"), ("/notifications", "notifications"),
+    ("/backup", "backup"), ("/imports", "imports"), ("/exports", "exports"), ("/coupons", "coupons"), ("/low-stock", "low_stock"),
+    ("/deliveries", "deliveries"), ("/roles", "roles"), ("/status", "status"), ("/settings", "settings"), ("/guide", "guide"), ("/audit", "audit"), ("/logs", "logs"),
 ]
 
 SETTING_GROUPS = [
@@ -66,7 +68,12 @@ SETTING_GROUPS = [
         "keys": ["BINANCE_PAY_ENABLED", "BINANCE_PAY_API_KEY", "BINANCE_PAY_SECRET_KEY", "BINANCE_PAY_BASE_URL", "BINANCE_PAY_RETURN_URL", "BINANCE_PAY_WEBHOOK_URL"],
     },
     {
-        "title": "5. Web Admin",
+        "title": "5. Giao hàng cho khách",
+        "desc": "Chọn cách bot gửi tài khoản/key sau khi khách thanh toán. Nên dùng file nếu bán nhiều dòng hoặc muốn khách dễ lưu lại.",
+        "keys": ["DELIVERY_OUTPUT_MODE", "DELIVERY_FILE_THRESHOLD", "LOW_STOCK_THRESHOLD"],
+    },
+    {
+        "title": "6. Web Admin",
         "desc": "Tài khoản đăng nhập trang quản trị, giao diện mặc định và cổng chạy web.",
         "keys": ["WEB_ADMIN_USERNAME", "WEB_ADMIN_PASSWORD", "WEB_SESSION_SECRET", "WEB_HOST", "WEB_PORT", "WEB_DEFAULT_LANGUAGE", "WEB_DEFAULT_THEME"],
     },
@@ -100,6 +107,9 @@ SETTING_META: dict[str, dict[str, str]] = {
     "WEB_PORT": {"label": "Web port", "help": "Cổng chạy Web Admin. Mặc định 8080.", "placeholder": "8080"},
     "WEB_DEFAULT_LANGUAGE": {"label": "Ngôn ngữ mặc định", "help": "vi cho tiếng Việt, en cho tiếng Anh.", "placeholder": "vi"},
     "WEB_DEFAULT_THEME": {"label": "Giao diện mặc định", "help": "light hoặc dark.", "placeholder": "light"},
+    "DELIVERY_OUTPUT_MODE": {"label": "Cách giao hàng", "help": "auto = đơn nhỏ hiện trong chat, đơn lớn gửi file; file_only = mọi đơn đều gửi file; inline_and_file = đơn nhỏ vừa hiện trong chat vừa gửi file.", "placeholder": "auto"},
+    "DELIVERY_FILE_THRESHOLD": {"label": "Gửi file khi từ số lượng", "help": "Chỉ áp dụng cho chế độ tự động. Ví dụ 20 nghĩa là đơn từ 20 dòng trở lên sẽ gửi file TXT.", "placeholder": "20"},
+    "LOW_STOCK_THRESHOLD": {"label": "Ngưỡng cảnh báo hết hàng", "help": "Web sẽ cảnh báo khi tồn kho sản phẩm nhỏ hơn hoặc bằng số này.", "placeholder": "5"},
 }
 
 CSS = r"""
@@ -256,7 +266,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                 cookies.append(f"nimo_theme={query['theme'][0]}; Path=/; SameSite=Lax")
             if "lang" in query:
                 cookies.append(f"nimo_lang={query['lang'][0]}; Path=/; SameSite=Lax")
-            if cookies and parsed.path in {"/", "/orders", "/products", "/categories", "/stock", "/users", "/wallets", "/finance", "/payments", "/settings", "/audit", "/logs", "/bots", "/notifications", "/backup", "/guide"}:
+            if cookies and parsed.path in {"/", "/orders", "/products", "/categories", "/stock", "/users", "/wallets", "/finance", "/payments", "/settings", "/audit", "/logs", "/bots", "/notifications", "/backup", "/guide", "/status", "/imports", "/exports", "/reconcile", "/coupons", "/roles", "/deliveries", "/low-stock"}:
                 self._redirect(parsed.path, cookies)
                 return
         if parsed.path == "/static/style.css":
@@ -280,6 +290,14 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(self._page("backup", "", active="/backup", error=str(exc)), status=500)
             return
+        if parsed.path == "/exports/download":
+            try:
+                kind = parse_qs(parsed.query).get("kind", ["orders"])[0]
+                filename, data = self.service.export_report(kind)
+                self._send(data, content_type="text/csv; charset=utf-8", headers={"Content-Disposition": f"attachment; filename={filename}"})
+            except Exception as exc:
+                self._send(self._page("exports", "", active="/exports", error=str(exc)), status=500)
+            return
         try:
             html_body = self._route_get(parsed.path, parse_qs(parsed.query))
             self._send(html_body)
@@ -288,6 +306,24 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path in {"/webhook/sepay", "/webhook/binance"}:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length).decode("utf-8") if length else ""
+            try:
+                payload = json.loads(raw) if raw.strip().startswith("{") else {k: v[-1] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+                provider = "sepay" if parsed.path.endswith("sepay") else "binance"
+                result = self.service.ingest_webhook_event(
+                    provider=provider,
+                    tx_id=str(payload.get("tx_id") or payload.get("id") or payload.get("transaction_id") or payload.get("provider_tx_id") or ""),
+                    amount=str(payload.get("amount") or payload.get("transferAmount") or payload.get("amountIn") or "0"),
+                    currency=str(payload.get("currency") or "VND"),
+                    description=str(payload.get("description") or payload.get("content") or payload.get("note") or payload.get("remark") or ""),
+                    raw=payload,
+                )
+                self._send(json.dumps(result, ensure_ascii=False), content_type="application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), status=400, content_type="application/json; charset=utf-8")
+            return
         if parsed.path == "/login":
             form = self._read_form()
             admin = self.service.authenticate(form.get("username", ""), form.get("password", ""))
@@ -337,6 +373,22 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return self._page("backup", self._backup(), active="/backup")
         if path == "/guide":
             return self._page("guide", self._guide(), active="/guide")
+        if path == "/status":
+            return self._page("status", self._status_page(), active="/status")
+        if path == "/imports":
+            return self._page("imports", self._imports_page(), active="/imports")
+        if path == "/exports":
+            return self._page("exports", self._exports_page(), active="/exports")
+        if path == "/reconcile":
+            return self._page("reconcile", self._reconcile_page(query), active="/reconcile")
+        if path == "/coupons":
+            return self._page("coupons", self._coupons_page(), active="/coupons")
+        if path == "/roles":
+            return self._page("roles", self._roles_page(), active="/roles")
+        if path == "/deliveries":
+            return self._page("deliveries", self._deliveries_page(), active="/deliveries")
+        if path == "/low-stock":
+            return self._page("low_stock", self._low_stock_page(query), active="/low-stock")
         if path == "/settings":
             return self._page("settings", self._settings(), active="/settings")
         if path == "/audit":
@@ -393,6 +445,35 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         if path == "/backup/restore":
             self.service.restore_backup(form.get("backup_path", ""), admin_id=admin_id)
             return "/backup"
+        if path == "/status/check-token":
+            token = form.get("token") or self.service.get_settings().get("BOT_TOKEN", "")
+            result = self.service.check_bot_token(token)
+            self.service.log(admin_id, "bot.token_check", "bot", "", result)
+            return "/status"
+        if path == "/imports/catalog":
+            self.service.import_catalog_csv(form.get("csv_text", ""), admin_id=admin_id)
+            return "/imports"
+        if path == "/reconcile/review":
+            self.service.mark_payment_event_reviewed(int(form["event_id"]), form.get("note", ""), admin_id=admin_id)
+            return "/reconcile"
+        if path == "/coupons/create":
+            self.service.create_coupon(form, admin_id=admin_id)
+            return "/coupons"
+        if path == "/coupons/update":
+            self.service.update_coupon(int(form["id"]), form, admin_id=admin_id)
+            return "/coupons"
+        if path == "/coupons/delete":
+            self.service.delete_coupon(int(form["id"]), admin_id=admin_id)
+            return "/coupons"
+        if path == "/roles/create":
+            self.service.create_admin_account(username=form.get("username", ""), password=form.get("password", ""), role=form.get("role", "viewer"), admin_id=admin_id)
+            return "/roles"
+        if path == "/roles/update":
+            self.service.update_admin_account(int(form["id"]), role=form.get("role", "viewer"), is_active=form.get("is_active") == "on", password=form.get("password", ""), admin_id=admin_id)
+            return "/roles"
+        if path == "/low-stock/notify":
+            self.service.queue_low_stock_notifications(int(form.get("threshold") or 5), admin_id=admin_id)
+            return "/low-stock"
         if path == "/settings":
             values = {key: form.get(key, "") for key in DEFAULT_SETTING_KEYS}
             self.service.update_settings(values, admin_id=admin_id, write_env=form.get("write_env") == "on")
@@ -509,6 +590,12 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return f'''<div class="setting-field"><label>{label}<select name="{key}"><option value="vi" {selected(value,"vi")}>Tiếng Việt</option><option value="en" {selected(value,"en")}>English</option></select></label><div class="help">{help_text}</div></div>'''
         if key in {"WEB_DEFAULT_THEME"}:
             return f'''<div class="setting-field"><label>{label}<select name="{key}"><option value="light" {selected(value,"light")}>Sáng</option><option value="dark" {selected(value,"dark")}>Tối</option></select></label><div class="help">{help_text}</div></div>'''
+        if key == "DELIVERY_OUTPUT_MODE":
+            return f'''<div class="setting-field full"><label>{label}<select name="{key}">
+                <option value="auto" {selected(value,"auto")}>Tự động: đơn nhỏ hiện chat, đơn lớn gửi file</option>
+                <option value="file_only" {selected(value,"file_only")}>Luôn gửi file TXT cho mọi đơn</option>
+                <option value="inline_and_file" {selected(value,"inline_and_file")}>Hiện trong chat và gửi kèm file</option>
+            </select></label><div class="help">{help_text}</div></div>'''
         shown_value = "" if is_secret else esc(value)
         secret_note = "<div class=\"help\">Đã có giá trị cũ. Để trống nếu không muốn đổi.</div>" if is_secret and value else ""
         klass = "setting-field secret" if is_secret else "setting-field"
@@ -522,7 +609,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             fields = "".join(self._setting_input(key, settings.get(key, {"value": DEFAULT_SETTING_KEYS[key][0], "is_secret": DEFAULT_SETTING_KEYS[key][1]})) for key in group["keys"])
             open_attr = " open" if idx == 0 else ""
             groups.append(f'''<details class="setup-section"{open_attr}><summary><span>{esc(group["title"])}</span><span class="muted">Mở/đóng</span></summary><div class="setup-content"><p class="muted">{esc(group["desc"])}</p><div class="form-grid">{fields}</div></div></details>''')
-        return f'''<div class="hint-box"><b>Hướng dẫn cấu hình:</b><br>1) Nhập Bot Token và Telegram ID admin trước. 2) Nếu dùng ngân hàng, bật Bank và nhập Bank BIN/Số tài khoản/Chủ tài khoản/SePay API key. 3) Tick “Ghi ra file .env”. 4) Lưu xong restart bot/web để áp dụng biến môi trường.</div><div class="card"><form method="post" action="/settings">{self._form_csrf()}{"".join(groups)}<label style="display:flex;gap:10px;align-items:center;font-weight:800"><input style="width:auto;margin:0" type="checkbox" name="write_env"> Ghi ra file .env để áp dụng sau khi restart bot/web</label><br><button>{tr(self._theme_lang()[0],"save")}</button></form></div>'''
+        return f'''<div class="hint-box"><b>Hướng dẫn cấu hình:</b><br>1) Nhập Bot Token và Telegram ID admin trước. 2) Nếu dùng ngân hàng, bật Bank và nhập Bank BIN/Số tài khoản/Chủ tài khoản/SePay API key. 3) Trong mục <b>Giao hàng cho khách</b>, chọn đơn nhỏ hiện trực tiếp hay mọi đơn đều gửi file. 4) Tick “Ghi ra file .env”. 5) Lưu xong restart bot/web để áp dụng biến môi trường.</div><div class="card"><form method="post" action="/settings">{self._form_csrf()}{"".join(groups)}<label style="display:flex;gap:10px;align-items:center;font-weight:800"><input style="width:auto;margin:0" type="checkbox" name="write_env"> Ghi ra file .env để áp dụng sau khi restart bot/web</label><br><button>{tr(self._theme_lang()[0],"save")}</button></form></div>'''
 
     def _bots(self) -> str:
         rows = []
@@ -600,6 +687,54 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
     def _logs(self) -> str:
         rows = "".join(f'<tr><td>{l["id"]}</td><td>{esc(l["admin_username"] or l["admin_id"])}</td><td>{esc(l["action"])}</td><td>{esc(l["target_type"])}</td><td>{esc(l["target_id"])}</td><td><code>{esc(l["metadata_json"])}</code></td><td>{esc(l["created_at"])}</td></tr>' for l in self.service.audit_logs())
         return '<div class="card table-wrap"><table class="premium-table"><tr><th>ID</th><th>Admin</th><th>Hành động</th><th>Loại</th><th>ID</th><th>Dữ liệu</th><th>Thời gian</th></tr>' + rows + '</table></div>'
+
+
+    def _status_page(self) -> str:
+        st = self.service.system_status()
+        def ok(v: object) -> str:
+            return '<span class="status delivered">OK</span>' if v else '<span class="status rejected">Cần xử lý</span>'
+        lows = ''.join(f'<li>{esc(i["name"])}: còn {int(i["available"])} dòng</li>' for i in st.get('low_stock_items', [])) or '<li>Không có sản phẩm dưới ngưỡng</li>'
+        return f'''<div class="grid2"><div class="card"><h2>Trạng thái hệ thống</h2><table><tr><td>Database</td><td>{ok(st['database_ok'])}</td></tr><tr><td>Bot token</td><td>{ok(st['bot_token_ok'])}</td></tr><tr><td>Ngân hàng/SePay</td><td>{ok(st['bank_enabled'] and st['sepay_configured'])}</td></tr><tr><td>Binance</td><td>{ok((not st['binance_enabled']) or st['binance_configured'])}</td></tr><tr><td>Backup dir</td><td><code>{esc(st['backup_dir'])}</code></td></tr></table></div><div class="card"><h2>Kiểm tra token BotFather</h2><form method="post" action="/status/check-token">{self._form_csrf()}<label>Dán token để kiểm tra định dạng<input name="token" placeholder="123456789:AA..."></label><br><button>Kiểm tra token</button></form><p class="muted">Kiểm tra này không gọi Telegram live để tránh lộ token trong log. Khi chạy bot, lệnh getMe sẽ xác nhận live.</p></div></div><div class="card"><h2>Cảnh báo kho thấp</h2><ul>{lows}</ul><a class="btn secondary" href="/low-stock">Mở trang cảnh báo kho</a></div>'''
+
+    def _imports_page(self) -> str:
+        sample = 'category,name,price,currency,cost,description,warranty_text,stock\nChatGPT,ChatGPT Plus 1 tháng,150000,VND,100000,Tài khoản 30 ngày,1 đổi 1,key1;key2'
+        return f'''<div class="grid2"><div class="card"><h2>Import sản phẩm/kho bằng CSV</h2><p class="muted">Dùng khi nhập nhiều sản phẩm. Cột bắt buộc: category,name,price. Cột stock có thể phân tách bằng dấu chấm phẩy.</p><form method="post" action="/imports/catalog">{self._form_csrf()}<label>Nội dung CSV<textarea name="csv_text" placeholder="{esc(sample)}" required></textarea></label><br><button>Import CSV</button></form></div><div class="card"><h2>Hướng dẫn nhanh</h2><ol><li>Mở Google Sheet/Excel.</li><li>Tạo cột category,name,price,currency,cost,description,warranty_text,stock.</li><li>Export CSV hoặc copy dòng dán vào ô bên trái.</li><li>Chạy Audit sau khi import.</li></ol></div></div>'''
+
+    def _exports_page(self) -> str:
+        links = ''.join(f'<a class="btn" href="/exports/download?kind={k}">Tải {label}.csv</a>' for k, label in [('orders','Đơn hàng'),('products','Sản phẩm'),('stock','Kho'),('wallets','Ví khách'),('finance','Dòng tiền'),('users','Người dùng')])
+        return f'<div class="card"><h2>Xuất báo cáo CSV</h2><p class="muted">Dùng để đối soát, lưu kế toán hoặc chuyển dữ liệu sang máy khác.</p><div class="action-row">{links}</div></div>'
+
+    def _reconcile_page(self, query: dict[str, list[str]]) -> str:
+        status = query.get('status', ['unmatched'])[0]
+        rows = ''
+        for r in self.service.list_reconciliation_events(status=status if status != 'all' else '', limit=200):
+            rows += f'''<tr><td>{r['id']}</td><td>{esc(r['provider'])}</td><td>{esc(r['provider_tx_id'])}</td><td>{esc(r['payment_code'])}</td><td>{money(r['amount_minor'], r['currency'])}</td><td>{status_badge(r['status'])}</td><td><code>{esc(r['raw_json'])}</code></td><td><form method="post" action="/reconcile/review">{self._form_csrf()}<input type="hidden" name="event_id" value="{r['id']}"><input name="note" placeholder="Ghi chú xử lý"><button class="small">Đã kiểm tra</button></form></td></tr>'''
+        return f'''<div class="card"><div class="section-head"><div><h2>Đối soát giao dịch lỗi/sai nội dung</h2><p class="muted">Theo dõi giao dịch không khớp mã đơn, sai nội dung, hoặc cần xử lý thủ công.</p></div><div class="action-row"><a class="btn secondary" href="/reconcile?status=unmatched">Unmatched</a><a class="btn secondary" href="/reconcile?status=all">Tất cả</a></div></div><div class="table-wrap"><table class="premium-table"><tr><th>ID</th><th>Provider</th><th>TX ID</th><th>Mã</th><th>Số tiền</th><th>Trạng thái</th><th>Raw</th><th>Xử lý</th></tr>{rows}</table></div></div>'''
+
+    def _coupons_page(self) -> str:
+        rows = ''
+        for c in self.service.list_coupons():
+            rows += f'''<tr><form method="post" action="/coupons/update">{self._form_csrf()}<input type="hidden" name="id" value="{c['id']}"><td><input name="code" value="{esc(c['code'])}"></td><td><select name="discount_type"><option value="fixed" {selected(c['discount_type'],'fixed')}>Giảm tiền</option><option value="percent" {selected(c['discount_type'],'percent')}>Giảm %</option></select></td><td><input name="discount_value" value="{esc(c['discount_value'])}"></td><td><input name="currency" value="{esc(c['currency'])}"></td><td><input name="max_uses" value="{esc(c['max_uses'])}"></td><td><input type="checkbox" name="is_active" {'checked' if c['is_active'] else ''}></td><td><button class="small">Lưu</button></form><form method="post" action="/coupons/delete" onsubmit="return confirm('Xóa coupon?')">{self._form_csrf()}<input type="hidden" name="id" value="{c['id']}"><button class="danger small">Xóa</button></form></td></tr>'''
+        form = f'''<div class="card"><h2>Tạo mã giảm giá</h2><form method="post" action="/coupons/create" class="form-grid">{self._form_csrf()}<label>Mã coupon<input name="code" placeholder="SALE10" required></label><label>Loại giảm<select name="discount_type"><option value="fixed">Giảm tiền</option><option value="percent">Giảm phần trăm</option></select></label><label>Giá trị<input name="discount_value" placeholder="10000 hoặc 10"></label><label>Tiền tệ<input name="currency" value="VND"></label><label>Giới hạn lượt dùng<input name="max_uses" value="0"></label><label>Hết hạn<input name="expires_at" placeholder="2026-12-31T23:59:00+00:00"></label><label class="full">Ghi chú<input name="note"></label><label><input style="width:auto" type="checkbox" name="is_active" checked> Đang bật</label><button>Tạo coupon</button></form></div>'''
+        return form + '<div class="card table-wrap"><h2>Danh sách coupon</h2><table class="premium-table"><tr><th>Mã</th><th>Loại</th><th>Giá trị</th><th>Tiền tệ</th><th>Giới hạn</th><th>Bật</th><th>Thao tác</th></tr>' + rows + '</table></div>'
+
+    def _roles_page(self) -> str:
+        def role_options(cur: str) -> str:
+            return ''.join(f'<option value="{r}" {selected(cur,r)}>{r}</option>' for r in ['owner','finance','stock','support','viewer'])
+        rows = ''
+        for a in self.service.list_admin_accounts():
+            rows += f'''<tr><form method="post" action="/roles/update">{self._form_csrf()}<input type="hidden" name="id" value="{a['id']}"><td>{a['id']}</td><td>{esc(a['username'])}</td><td><select name="role">{role_options(a['role'])}</select></td><td><input type="checkbox" name="is_active" {'checked' if a['is_active'] else ''}></td><td><input type="password" name="password" placeholder="Để trống nếu không đổi"></td><td><button class="small">Lưu</button></td></form></tr>'''
+        form = f'''<div class="card"><h2>Thêm admin/phân quyền</h2><p class="muted">Owner toàn quyền; Finance xử lý tiền; Stock nhập kho; Support xem/hỗ trợ; Viewer chỉ xem.</p><form method="post" action="/roles/create" class="form-grid">{self._form_csrf()}<label>Username<input name="username" required></label><label>Mật khẩu<input type="password" name="password" required></label><label>Vai trò<select name="role">{role_options('viewer')}</select></label><button>Tạo admin</button></form></div>'''
+        return form + '<div class="card table-wrap"><table class="premium-table"><tr><th>ID</th><th>Username</th><th>Vai trò</th><th>Bật</th><th>Mật khẩu mới</th><th>Lưu</th></tr>' + rows + '</table></div>'
+
+    def _deliveries_page(self) -> str:
+        rows = ''.join(f'<tr><td>{d["id"]}</td><td>{esc(d.get("public_code") or d.get("order_id"))}</td><td>{esc(d.get("telegram_id") or "")}</td><td>{esc(d["source"])}</td><td>{esc(d["filename"])}</td><td>{esc(d["created_at"])}</td></tr>' for d in self.service.list_delivery_downloads())
+        return '<div class="card"><h2>Nhật ký tải/gửi file đơn hàng</h2><p class="muted">Theo dõi khách/admin tải lại file giao hàng, giúp kiểm tra khi khách báo mất file.</p><div class="table-wrap"><table class="premium-table"><tr><th>ID</th><th>Đơn</th><th>Telegram ID</th><th>Nguồn</th><th>File</th><th>Thời gian</th></tr>' + rows + '</table></div></div>'
+
+    def _low_stock_page(self, query: dict[str, list[str]]) -> str:
+        threshold = int(query.get('threshold', ['5'])[0] or 5)
+        rows = ''.join(f'<tr><td>{i["product_id"]}</td><td>{esc(i["name"])}</td><td>{int(i["available"])}</td><td><a class="btn small secondary" href="/stock?product_id={i["product_id"]}">Nhập thêm</a></td></tr>' for i in self.service.low_stock_items(threshold))
+        return f'''<div class="card"><h2>Cảnh báo hết hàng</h2><form method="get" action="/low-stock" class="form-grid"><label>Ngưỡng cảnh báo<input name="threshold" value="{threshold}"></label><button>Lọc</button></form><br><form method="post" action="/low-stock/notify">{self._form_csrf()}<input type="hidden" name="threshold" value="{threshold}"><button>Gửi thông báo cho admin/bot queue</button></form></div><div class="card table-wrap"><table class="premium-table"><tr><th>ID</th><th>Sản phẩm</th><th>Còn</th><th>Thao tác</th></tr>{rows}</table></div>'''
 
 
 def create_server(db_path: str | Path, *, host: str = "127.0.0.1", port: int = 8080, session_secret: str | None = None, project_root: str | Path | None = None, bootstrap_username: str = "admin", bootstrap_password: str | None = None) -> ThreadingHTTPServer:

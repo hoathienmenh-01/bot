@@ -39,3 +39,26 @@
 - Large delivered orders are exported as downloadable TXT files instead of dumping hundreds/thousands of accounts into chat.
 - Added `/taidon ORD...`, `/download_order ORD...`, and `/export_order ORD...` so customers can download an already-delivered order again.
 - Added regression tests for large delivery export and single-message navigation callback rows.
+
+## v2.0.0 - Delivery File Policy / Web Admin Config
+- Added Web Admin delivery settings:
+  - `auto`: small orders are shown in chat, large orders are sent as TXT files.
+  - `file_only`: every delivered order is sent as a TXT file, including quantity 1.
+  - `inline_and_file`: small orders are shown in chat and also sent as TXT files.
+- Added configurable file threshold via `DELIVERY_FILE_THRESHOLD`.
+- Added `.env.example` entries for delivery policy.
+- Added regression tests for one-item file delivery, inline+file delivery, and configurable threshold.
+
+## v2.1.0 - Operations Center / Reports / Reconciliation
+
+- Added System Status page: database, bot token format, bank/SePay, Binance and low-stock overview.
+- Added Bot Token format checker from Web Admin.
+- Added CSV import page for categories/products/stock.
+- Added CSV export reports for orders, products, stock, wallets, finance and users.
+- Added provider webhook endpoints `/webhook/sepay` and `/webhook/binance` with unmatched-event persistence for reconciliation.
+- Added Admin Roles page: owner, finance, stock, support, viewer.
+- Added Reconciliation page for unmatched/reviewed external payment events.
+- Added Delivery Logs page and bot-side delivery file logging.
+- Added Coupon management page.
+- Added Low-stock warning page and queued low-stock notifications.
+- Full test suite: 55 tests passing, compileall OK, seed demo OK, audit OK.

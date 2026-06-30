@@ -1,15 +1,16 @@
-# TEST REPORT - v1.9.0
+# TEST REPORT - v2.1.0
 
-Commands run:
+Commands executed:
 
 ```bash
+python -m compileall -q src tests
 ./scripts/run_full_tests.sh
 ```
 
 Result:
 
 ```text
-Ran 51 tests in 1.929s
+Ran 55 tests in 3.293s
 OK
 Seeded demo categories/products/stock.
 AUDIT OK: no consistency issues found
@@ -17,17 +18,12 @@ FULL TEST OK
 ```
 
 Covered areas:
-- Wallet/ledger/order/stock/payment idempotency.
-- SePay/Binance helper logic.
+
+- Wallet/ledger idempotency and invalid amount protection.
+- Order creation, stock reservation, expiry, cancellation, refund.
+- Bank/SePay payment matching, overpay/underpay/late payment handling.
+- Delivery file policy for small/large orders.
 - Web Admin login/session/CSRF.
-- Product create/edit/delete/import-stock.
-- Product search for customers.
-- Bot notification queue.
-- Managed bot CRUD and primary bot selection.
-- Backup ZIP download and SQLite database backup.
-- First-run setup path.
-- Run-all entrypoint.
-- Quantity-aware purchase flow.
-- Single-message inline callback navigation.
-- Large order delivery export as TXT.
-- Re-download delivered order file by order code.
+- Product/category/stock/settings/wallet/payment management.
+- Multi-bot manager, notifications, backup/restore, admin guide.
+- v2.1 additions: status page, token checker, CSV import/export, webhook ingestion, reconciliation, coupons, roles, delivery logs, low-stock alerts.

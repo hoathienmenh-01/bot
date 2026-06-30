@@ -100,11 +100,13 @@ class WebAdminTest(unittest.TestCase):
         self.assertEqual(result["status"], "order_delivered")
         self.assertEqual(OrderService(self.db).get_order(order["id"])["status"], "delivered")
 
-        self.web.update_settings({"SHOP_NAME": "NIMO TEST", "BANK_ENABLED": "on", "WEB_PORT": "9090", "WEB_ADMIN_USERNAME": "owner2", "WEB_ADMIN_PASSWORD": "NewStrongPass123", "BOT_TOKEN": "123456789:AASecretTokenValueForTest"}, admin_id=admin_id, write_env=True)
+        self.web.update_settings({"SHOP_NAME": "NIMO TEST", "BANK_ENABLED": "on", "WEB_PORT": "9090", "WEB_ADMIN_USERNAME": "owner2", "WEB_ADMIN_PASSWORD": "NewStrongPass123", "BOT_TOKEN": "123456789:AASecretTokenValueForTest", "DELIVERY_OUTPUT_MODE": "file_only", "DELIVERY_FILE_THRESHOLD": "1"}, admin_id=admin_id, write_env=True)
         env_text = (self.root / ".env").read_text(encoding="utf-8")
         self.assertIn("SHOP_NAME=NIMO TEST", env_text)
         self.assertIn("BANK_ENABLED=true", env_text)
         self.assertIn("BOT_TOKEN=123456789:AASecretTokenValueForTest", env_text)
+        self.assertIn("DELIVERY_OUTPUT_MODE=file_only", env_text)
+        self.assertIn("DELIVERY_FILE_THRESHOLD=1", env_text)
         self.assertIsNotNone(self.web.authenticate("owner2", "NewStrongPass123"))
 
         self.web.update_settings({"BOT_TOKEN": "", "WEB_ADMIN_USERNAME": "owner2", "WEB_ADMIN_PASSWORD": ""}, admin_id=admin_id, write_env=True)
@@ -171,6 +173,8 @@ class WebAdminTest(unittest.TestCase):
             self.assertIn("Hướng dẫn cấu hình", settings_page)
             self.assertIn("Bot Token", settings_page)
             self.assertIn("Mã ngân hàng", settings_page)
+            self.assertIn("Giao hàng cho khách", settings_page)
+            self.assertIn("Luôn gửi file TXT cho mọi đơn", settings_page)
             self.assertNotIn("Payment intents", settings_page)
             self.assertIn("Quản lý bot", opener.open(base + "/bots").read().decode("utf-8"))
             self.assertIn("Tạo thông báo bot", opener.open(base + "/notifications").read().decode("utf-8"))
@@ -209,3 +213,85 @@ class WebAdminTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class WebAdminV21OperationsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "shop.db"
+        self.db = Database(self.db_path)
+        self.web = AdminWebService(self.db, project_root=self.root)
+        self.web.init(bootstrap_username="owner", bootstrap_password="StrongPass123")
+        self.admin_id = int(self.web.authenticate("owner", "StrongPass123")["id"])
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_v21_operations_status_import_export_coupons_roles_reconcile_low_stock(self) -> None:
+        self.assertFalse(self.web.system_status()["bot_token_ok"])
+        self.assertFalse(self.web.check_bot_token("bad")["ok"])
+        self.assertTrue(self.web.check_bot_token("987654321:AAVeryLongTokenValueForFormatCheck_123456")["ok"])
+
+        result = self.web.import_catalog_csv(
+            "category,name,price,currency,cost,description,warranty_text,stock\n"
+            "AI,Searchable GPT,1000,VND,500,desc,bh,key1;key2\n",
+            admin_id=self.admin_id,
+        )
+        self.assertEqual(result["products"], 1)
+        self.assertEqual(result["stock"], 2)
+        filename, data = self.web.export_report("products")
+        self.assertTrue(filename.endswith(".csv"))
+        self.assertIn("Searchable GPT", data.decode("utf-8-sig"))
+
+        coupon_id = self.web.create_coupon({"code": "SALE10", "discount_type": "percent", "discount_value": "10", "max_uses": "5", "is_active": "on"}, admin_id=self.admin_id)
+        self.assertTrue(any(c["id"] == coupon_id for c in self.web.list_coupons()))
+        self.web.update_coupon(coupon_id, {"code": "SALE20", "discount_type": "percent", "discount_value": "20", "max_uses": "3", "is_active": "on", "currency": "VND"}, admin_id=self.admin_id)
+        self.assertEqual(self.web.list_coupons()[0]["code"], "SALE20")
+
+        role_id = self.web.create_admin_account(username="finance1", password="Pass123456", role="finance", admin_id=self.admin_id)
+        self.web.update_admin_account(role_id, role="viewer", is_active=True, admin_id=self.admin_id)
+        self.assertTrue(any(a["username"] == "finance1" and a["role"] == "viewer" for a in self.web.list_admin_accounts()))
+
+        with self.db.transaction() as conn:
+            conn.execute("INSERT INTO external_payment_events(provider, provider_tx_id, payment_code, currency, amount_minor, status, raw_json) VALUES('bank','BADTX','', 'VND', 1000, 'unmatched', '{}')")
+        events = self.web.list_reconciliation_events()
+        self.assertEqual(events[0]["provider_tx_id"], "BADTX")
+        self.web.mark_payment_event_reviewed(events[0]["id"], "checked", admin_id=self.admin_id)
+        self.assertEqual(self.web.list_reconciliation_events(status="reviewed")[0]["status"], "reviewed")
+
+        self.web.log_delivery_download(order_id=None, user_id=None, source="test", filename="order.txt")
+        self.assertEqual(self.web.list_delivery_downloads()[0]["filename"], "order.txt")
+        lows = self.web.low_stock_items(threshold=10)
+        self.assertTrue(any(i["name"] == "Searchable GPT" for i in lows))
+        queued = self.web.queue_low_stock_notifications(threshold=10, admin_id=self.admin_id)
+        self.assertGreaterEqual(queued, 1)
+
+    def test_v21_http_pages_and_exports_are_reachable(self) -> None:
+        server = create_server(self.db_path, host="127.0.0.1", port=0, session_secret="test-secret", project_root=self.root, bootstrap_username="owner", bootstrap_password="StrongPass123")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        try:
+            data = urllib.parse.urlencode({"username": "owner", "password": "StrongPass123"}).encode("utf-8")
+            opener.open(urllib.request.Request(base + "/login", data=data, method="POST"))
+            for path, marker in [
+                ("/status", "Trạng thái hệ thống"),
+                ("/imports", "Import sản phẩm"),
+                ("/exports", "Xuất báo cáo"),
+                ("/reconcile", "Đối soát giao dịch"),
+                ("/coupons", "Tạo mã giảm giá"),
+                ("/roles", "Thêm admin"),
+                ("/deliveries", "Nhật ký tải"),
+                ("/low-stock", "Cảnh báo hết hàng"),
+            ]:
+                page = opener.open(base + path).read().decode("utf-8")
+                self.assertIn(marker, page)
+            resp = opener.open(base + "/exports/download?kind=orders")
+            self.assertEqual(resp.headers.get_content_type(), "text/csv")
+            payload = urllib.parse.urlencode({"tx_id": "WH1", "amount": "1000", "currency": "VND", "description": "khong co ma"}).encode("utf-8")
+            wh = opener.open(urllib.request.Request(base + "/webhook/sepay", data=payload, method="POST")).read().decode("utf-8")
+            self.assertIn("unmatched", wh)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=3)

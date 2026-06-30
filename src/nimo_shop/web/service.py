@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
+import io
 import os
+import re
 import secrets
 import shutil
 import zipfile
@@ -59,6 +62,41 @@ CREATE TABLE IF NOT EXISTS managed_bots (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_managed_bots_enabled ON managed_bots(is_enabled, is_primary, id);
+
+CREATE TABLE IF NOT EXISTS coupons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    discount_type TEXT NOT NULL CHECK(discount_type IN ('percent','fixed')),
+    discount_value INTEGER NOT NULL CHECK(discount_value >= 0),
+    currency TEXT NOT NULL DEFAULT 'VND',
+    max_uses INTEGER NOT NULL DEFAULT 0,
+    used_count INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    expires_at TEXT,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS delivery_download_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER,
+    user_id INTEGER,
+    source TEXT NOT NULL DEFAULT 'bot',
+    filename TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE SET NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS low_stock_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    threshold INTEGER NOT NULL,
+    available INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','closed')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    closed_at TEXT,
+    FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+);
+
 """
 
 DEFAULT_SETTING_KEYS: dict[str, tuple[str, int]] = {
@@ -89,6 +127,13 @@ DEFAULT_SETTING_KEYS: dict[str, tuple[str, int]] = {
     "WEB_PORT": ("8080", 0),
     "WEB_DEFAULT_LANGUAGE": ("vi", 0),
     "WEB_DEFAULT_THEME": ("light", 0),
+    # Delivery display policy for digital goods.
+    # auto: inline small orders, file for large/long orders.
+    # file_only: always send a TXT file and only show a short summary in chat.
+    # inline_and_file: show inline when small and also attach a TXT file.
+    "DELIVERY_OUTPUT_MODE": ("auto", 0),
+    "DELIVERY_FILE_THRESHOLD": ("20", 0),
+    "LOW_STOCK_THRESHOLD": ("5", 0),
 }
 
 
@@ -662,6 +707,257 @@ class AdminWebService:
                 with zf.open(".env") as src, (self.project_root / ".env").open("wb") as dst:
                     shutil.copyfileobj(src, dst)
         self.log(admin_id, "backup.restore", "backup", str(path), {"safety_backup": str(safety)})
+
+
+    # ------------------------------------------------------------------
+    # v2.1 operations: status, imports, exports, reconciliation, roles,
+    # coupons, delivery logs, webhooks and low-stock monitoring.
+
+    def system_status(self) -> dict[str, object]:
+        raw_settings = self.get_settings()
+        settings = {k: str(v.get("value", "")) for k, v in raw_settings.items()}
+        def token_ok(token: str) -> bool:
+            return bool(re.match(r"^\d{6,}:AA[A-Za-z0-9_-]{20,}$", (token or "").strip()))
+        db_ok = True
+        db_error = ""
+        try:
+            with self.db.connect() as conn:
+                conn.execute("SELECT 1").fetchone()
+        except Exception as exc:  # pragma: no cover - defensive
+            db_ok = False
+            db_error = str(exc)
+        low = self.low_stock_items(threshold=int(settings.get("LOW_STOCK_THRESHOLD", "5") or 5))
+        return {
+            "database_ok": db_ok,
+            "database_error": db_error,
+            "bot_token_ok": token_ok(settings.get("BOT_TOKEN", "")),
+            "bot_configured": bool((settings.get("BOT_TOKEN") or "").strip()),
+            "sepay_configured": bool((settings.get("SEPAY_API_KEY") or "").strip()),
+            "bank_enabled": str(settings.get("BANK_ENABLED", "false")).lower() == "true",
+            "binance_enabled": str(settings.get("BINANCE_PAY_ENABLED", "false")).lower() == "true",
+            "binance_configured": bool((settings.get("BINANCE_PAY_API_KEY") or "").strip() and (settings.get("BINANCE_PAY_SECRET_KEY") or "").strip()),
+            "backup_dir": str(self.project_root / "backups"),
+            "low_stock_count": len(low),
+            "low_stock_items": low[:10],
+        }
+
+    def check_bot_token(self, token: str) -> dict[str, object]:
+        token = (token or "").strip()
+        if not token:
+            return {"ok": False, "message": "Token trống"}
+        if token.startswith("PASTE") or token.startswith("123456789:"):
+            return {"ok": False, "message": "Token vẫn là mẫu, chưa phải token thật từ BotFather"}
+        if not re.match(r"^\d{6,}:AA[A-Za-z0-9_-]{20,}$", token):
+            return {"ok": False, "message": "Token sai định dạng. Token thường có dạng 123456789:AA..."}
+        return {"ok": True, "message": "Token đúng định dạng. Muốn kiểm tra live, chạy bot hoặc dùng lệnh getMe."}
+
+    def import_catalog_csv(self, csv_text: str, *, admin_id: int | None = None) -> dict[str, int]:
+        """Import categories/products/stock from CSV text.
+
+        Columns: category,name,price,currency,cost,description,warranty_text,stock
+        stock can contain many values separated by |; for account lines that use |
+        themselves, import stock with textarea/stock page instead.
+        """
+        if not (csv_text or "").strip():
+            raise ValueError("Vui lòng dán nội dung CSV")
+        reader = csv.DictReader(io.StringIO(csv_text.strip()))
+        required = {"category", "name", "price"}
+        if not reader.fieldnames or not required.issubset({h.strip() for h in reader.fieldnames}):
+            raise ValueError("CSV cần có cột: category,name,price")
+        cats: dict[str, int] = {}
+        created_products = 0
+        created_stock = 0
+        for row in reader:
+            category = (row.get("category") or "Khác").strip() or "Khác"
+            if category not in cats:
+                with self.db.connect() as conn:
+                    found = conn.execute("SELECT id FROM categories WHERE LOWER(name)=LOWER(?)", (category,)).fetchone()
+                cats[category] = int(found["id"]) if found else self.create_category(category, admin_id=admin_id)
+            pid = self.create_product(
+                {
+                    "category_id": str(cats[category]),
+                    "name": row.get("name") or "",
+                    "currency": row.get("currency") or "VND",
+                    "price": row.get("price") or "0",
+                    "cost": row.get("cost") or "0",
+                    "description": row.get("description") or "",
+                    "warranty_text": row.get("warranty_text") or row.get("warranty") or "",
+                },
+                admin_id=admin_id,
+            )
+            created_products += 1
+            stock_raw = (row.get("stock") or "").strip()
+            if stock_raw:
+                # CSV convenience: separate stock items with || or newline-escaped semicolon.
+                parts = [x.strip() for x in stock_raw.replace("||", "\n").splitlines() if x.strip()]
+                if len(parts) == 1 and ";" in stock_raw:
+                    parts = [x.strip() for x in stock_raw.split(";") if x.strip()]
+                created_stock += self.add_stock(pid, "\n".join(parts), admin_id=admin_id)
+        self.log(admin_id, "catalog.import_csv", "catalog", "", {"products": created_products, "stock": created_stock})
+        return {"products": created_products, "stock": created_stock, "categories": len(cats)}
+
+    def _rows_to_csv(self, rows: list[dict]) -> bytes:
+        out = io.StringIO()
+        if rows:
+            writer = csv.DictWriter(out, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        else:
+            out.write("empty\n")
+        return out.getvalue().encode("utf-8-sig")
+
+    def export_report(self, kind: str) -> tuple[str, bytes]:
+        kind = (kind or "orders").strip().lower()
+        with self.db.connect() as conn:
+            if kind == "products":
+                rows = [dict(r) for r in conn.execute("SELECT * FROM products ORDER BY id")]
+            elif kind == "stock":
+                rows = [dict(r) for r in conn.execute("SELECT s.*, p.name AS product_name FROM stock_items s JOIN products p ON p.id=s.product_id ORDER BY s.id")]
+            elif kind == "wallets":
+                rows = self.list_wallets(limit=100000)
+            elif kind == "finance":
+                rows = [dict(r) for r in conn.execute("SELECT * FROM cash_ledger ORDER BY id")]
+            elif kind == "users":
+                rows = self.list_users(limit=100000)
+            else:
+                kind = "orders"
+                rows = self.list_orders(limit=100000)
+        return f"nimo-{kind}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv", self._rows_to_csv(rows)
+
+    def list_admin_accounts(self) -> list[dict]:
+        with self.db.connect() as conn:
+            return [dict(r) for r in conn.execute("SELECT id, username, role, is_active, created_at, updated_at FROM admin_accounts ORDER BY id")]
+
+    def create_admin_account(self, *, username: str, password: str, role: str, admin_id: int | None = None) -> int:
+        username = (username or "").strip()
+        if not username or not password:
+            raise ValueError("Vui lòng nhập username và mật khẩu")
+        role = role if role in {"owner", "finance", "stock", "support", "viewer"} else "viewer"
+        with self.db.transaction() as conn:
+            cur = conn.execute("INSERT INTO admin_accounts(username,password_hash,role,is_active) VALUES(?,?,?,1)", (username, hash_password(password), role))
+            aid = int(cur.lastrowid)
+        self.log(admin_id, "admin.create", "admin", str(aid), {"username": username, "role": role})
+        return aid
+
+    def update_admin_account(self, account_id: int, *, role: str, is_active: bool, password: str = "", admin_id: int | None = None) -> None:
+        role = role if role in {"owner", "finance", "stock", "support", "viewer"} else "viewer"
+        with self.db.transaction() as conn:
+            if password:
+                row = conn.execute("UPDATE admin_accounts SET role=?, is_active=?, password_hash=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (role, 1 if is_active else 0, hash_password(password), account_id)).rowcount
+            else:
+                row = conn.execute("UPDATE admin_accounts SET role=?, is_active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (role, 1 if is_active else 0, account_id)).rowcount
+            if row == 0:
+                raise ValueError("Không tìm thấy admin")
+        self.log(admin_id, "admin.update", "admin", str(account_id), {"role": role, "active": is_active})
+
+    def list_reconciliation_events(self, status: str = "unmatched", limit: int = 200) -> list[dict]:
+        sql = "SELECT * FROM external_payment_events WHERE 1=1"
+        params: list[object] = []
+        if status:
+            sql += " AND status=?"
+            params.append(status)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self.db.connect() as conn:
+            return [dict(r) for r in conn.execute(sql, params)]
+
+    def mark_payment_event_reviewed(self, event_id: int, note: str = "", *, admin_id: int | None = None) -> None:
+        with self.db.transaction() as conn:
+            row = conn.execute("UPDATE external_payment_events SET status='reviewed', raw_json=? WHERE id=?", (dumps({'admin_note': note}), event_id)).rowcount
+            if row == 0:
+                raise ValueError("Không tìm thấy giao dịch")
+        self.log(admin_id, "payment.review", "external_payment_event", str(event_id), {"note": note})
+
+    def create_coupon(self, data: dict[str, str], *, admin_id: int | None = None) -> int:
+        code = (data.get("code") or "").strip().upper()
+        if not code:
+            raise ValueError("Vui lòng nhập mã coupon")
+        dtype = data.get("discount_type") if data.get("discount_type") in {"percent", "fixed"} else "fixed"
+        currency = normalize_currency(data.get("currency") or "VND")
+        value = int(to_minor(data.get("discount_value") or "0", currency) if dtype == "fixed" else int(data.get("discount_value") or "0"))
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                "INSERT INTO coupons(code,discount_type,discount_value,currency,max_uses,is_active,expires_at,note) VALUES(?,?,?,?,?,?,?,?)",
+                (code, dtype, value, currency, int(data.get("max_uses") or 0), 1 if str(data.get("is_active") or "on").lower() in {"on","1","true","yes"} else 0, (data.get("expires_at") or "").strip() or None, data.get("note") or ""),
+            )
+            cid = int(cur.lastrowid)
+        self.log(admin_id, "coupon.create", "coupon", str(cid), {"code": code})
+        return cid
+
+    def list_coupons(self) -> list[dict]:
+        with self.db.connect() as conn:
+            return [dict(r) for r in conn.execute("SELECT * FROM coupons ORDER BY id DESC")]
+
+    def update_coupon(self, coupon_id: int, data: dict[str, str], *, admin_id: int | None = None) -> None:
+        dtype = data.get("discount_type") if data.get("discount_type") in {"percent", "fixed"} else "fixed"
+        currency = normalize_currency(data.get("currency") or "VND")
+        value = int(to_minor(data.get("discount_value") or "0", currency) if dtype == "fixed" else int(data.get("discount_value") or "0"))
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "UPDATE coupons SET code=?, discount_type=?, discount_value=?, currency=?, max_uses=?, is_active=?, expires_at=?, note=? WHERE id=?",
+                ((data.get("code") or "").strip().upper(), dtype, value, currency, int(data.get("max_uses") or 0), 1 if str(data.get("is_active") or "").lower() in {"on","1","true","yes"} else 0, (data.get("expires_at") or "").strip() or None, data.get("note") or "", coupon_id),
+            ).rowcount
+            if row == 0:
+                raise ValueError("Không tìm thấy coupon")
+        self.log(admin_id, "coupon.update", "coupon", str(coupon_id), {})
+
+    def delete_coupon(self, coupon_id: int, *, admin_id: int | None = None) -> None:
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM coupons WHERE id=?", (coupon_id,))
+        self.log(admin_id, "coupon.delete", "coupon", str(coupon_id), {})
+
+    def log_delivery_download(self, *, order_id: int | None, user_id: int | None, source: str, filename: str) -> None:
+        with self.db.transaction() as conn:
+            conn.execute("INSERT INTO delivery_download_logs(order_id,user_id,source,filename) VALUES(?,?,?,?)", (order_id, user_id, source, filename))
+
+    def list_delivery_downloads(self, limit: int = 200) -> list[dict]:
+        with self.db.connect() as conn:
+            return [dict(r) for r in conn.execute(
+                """
+                SELECT d.*, o.public_code, u.telegram_id, u.username
+                  FROM delivery_download_logs d
+                  LEFT JOIN orders o ON o.id=d.order_id
+                  LEFT JOIN users u ON u.id=d.user_id
+                 ORDER BY d.id DESC LIMIT ?
+                """, (limit,))]
+
+    def low_stock_items(self, threshold: int = 5) -> list[dict]:
+        threshold = max(0, int(threshold))
+        with self.db.connect() as conn:
+            return [dict(r) for r in conn.execute(
+                """
+                SELECT p.id AS product_id, p.name, p.is_active,
+                       COALESCE(SUM(CASE WHEN s.status='available' THEN 1 ELSE 0 END),0) AS available
+                  FROM products p LEFT JOIN stock_items s ON s.product_id=p.id
+                 WHERE p.is_active=1
+                 GROUP BY p.id
+                HAVING available <= ?
+                 ORDER BY available ASC, p.id DESC
+                """, (threshold,))]
+
+    def queue_low_stock_notifications(self, threshold: int = 5, *, admin_id: int | None = None) -> int:
+        items = self.low_stock_items(threshold)
+        created = 0
+        for item in items:
+            title = f"⚠️ Sắp hết hàng: {item['name']}"
+            message = f"⚠️ <b>Sắp hết hàng</b>\nSản phẩm: <b>{item['name']}</b>\nCòn: <b>{item['available']}</b> dòng. Vui lòng nhập thêm kho."
+            NotificationService(self.db).queue_product_update(product_id=int(item["product_id"]), title=title, message=message)
+            created += 1
+        self.log(admin_id, "stock.low_stock_notify", "stock", "", {"threshold": threshold, "count": created})
+        return created
+
+    def ingest_webhook_event(self, *, provider: str, tx_id: str, amount: str, currency: str, description: str, raw: dict | None = None) -> dict:
+        amount_minor = to_minor(amount, currency)
+        try:
+            return PaymentService(self.db).confirm_provider_transaction(provider=provider, provider_tx_id=tx_id, amount_minor=amount_minor, currency=currency, description=description, raw=raw or {})
+        except Exception as exc:
+            # Persist a reviewable event when no payment code is found or no intent matches.
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO external_payment_events(provider, provider_tx_id, payment_code, currency, amount_minor, status, raw_json) VALUES(?,?,?,?,?,'unmatched',?)",
+                    (provider, tx_id, (raw or {}).get("payment_code") or "", normalize_currency(currency), amount_minor, dumps({"error": str(exc), **(raw or {})})),
+                )
+            return {"status": "unmatched", "error": str(exc)}
 
     def audit(self) -> list[dict]:
         return [{"code": issue.code, "message": issue.message} for issue in AuditService(self.db).run()]
