@@ -48,3 +48,9 @@ FULL TEST OK
 - Light/Dark + VI/EN toggle ở HTTP layer.
 - Audit không báo lỗi sau luồng web.
 - Toàn bộ 40 test lõi cũ vẫn pass.
+
+
+## v1.4.1 additional verification
+
+- Added tests for first-run setup token validation.
+- Verified full test suite after setup fallback changes.

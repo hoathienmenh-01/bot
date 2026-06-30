@@ -280,3 +280,20 @@ src/nimo_shop/
 - Không public web admin trực tiếp ra internet. Nên dùng LAN/VPN/SSH tunnel.
 - Nếu chạy trên điện thoại Android/Termux, bật `termux-wake-lock`, tắt tối ưu pin, backup `data/shop.db` hằng ngày.
 - Test giao dịch thật nhỏ trước khi nhận tiền lớn.
+
+
+## First-run setup without editing `.env`
+
+If `BOT_TOKEN` is empty, placeholder, or invalid, the bot launcher will no longer crash. Run:
+
+```bash
+PYTHONPATH=src python -m nimo_shop.main
+```
+
+It will automatically open Web Admin Setup at `http://127.0.0.1:8080`. Login with `admin / admin12345` if you have not configured another password, then open **Cấu hình / Settings**, enter `BOT_TOKEN`, `ADMIN_IDS`, bank/SePay/Binance values, tick **Ghi ra file .env**, save, and restart the same command.
+
+You can also run the web admin directly anytime:
+
+```bash
+PYTHONPATH=src python -m nimo_shop.web.main --host 0.0.0.0 --port 8080
+```

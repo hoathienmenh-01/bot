@@ -22,3 +22,11 @@
 - Chặn user thao tác order không thuộc về mình.
 - Làm sạch reservation khi stock sold.
 - Bổ sung Binance Pay create-order flow.
+
+
+## v1.4.1 - First-run web setup
+
+- Bot launcher no longer crashes when `BOT_TOKEN` is missing, placeholder, or malformed.
+- `python -m nimo_shop.main` now starts Web Admin Setup automatically so admins can configure everything from the browser.
+- `.env.example` now leaves `BOT_TOKEN` blank to avoid aiogram `TokenValidationError` during first-run setup.
+- Added regression tests for first-run setup token validation.

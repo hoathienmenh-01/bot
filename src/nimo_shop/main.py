@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from pathlib import Path
 
 from nimo_shop.bot.app import build_dispatcher
 from nimo_shop.config import Settings
@@ -8,6 +10,29 @@ from nimo_shop.db import Database
 from nimo_shop.payments.sepay import SepayClient
 from nimo_shop.services.payments import PaymentService
 from nimo_shop.services.provider_sync import apply_sepay_transactions
+
+_TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{20,}$")
+_PLACEHOLDER_TOKENS = {
+    "",
+    "token_botfather",
+    "PASTE_TOKEN_BOTFATHER_VAO_DAY",
+    "your_bot_token",
+    "changeme",
+}
+
+
+def is_configured_bot_token(token: str | None) -> bool:
+    """Return True only when token looks like a real BotFather token.
+
+    This prevents first-run setup from crashing with aiogram's raw
+    TokenValidationError when .env still contains placeholders. The bot still
+    lets aiogram validate the token before polling, but invalid/missing tokens
+    now open the web setup panel instead of killing the process.
+    """
+    value = (token or "").strip()
+    if value in _PLACEHOLDER_TOKENS:
+        return False
+    return bool(_TOKEN_RE.match(value))
 
 
 async def sepay_poll_loop(settings: Settings, payments: PaymentService) -> None:
@@ -23,6 +48,45 @@ async def sepay_poll_loop(settings: Settings, payments: PaymentService) -> None:
         await asyncio.sleep(max(10, int(settings.sepay_poll_seconds)))
 
 
+def run_setup_web(settings: Settings, *, reason: str) -> None:
+    """Run web admin setup when the bot cannot start yet."""
+    from nimo_shop.web.app import create_server
+
+    host = "0.0.0.0"
+    port = 8080
+    try:
+        from dotenv import load_dotenv
+        import os
+
+        load_dotenv()
+        host = os.getenv("WEB_HOST", host)
+        port = int(os.getenv("WEB_PORT", str(port)))
+        username = os.getenv("WEB_ADMIN_USERNAME", "admin")
+        password = os.getenv("WEB_ADMIN_PASSWORD") or None
+        session_secret = os.getenv("WEB_SESSION_SECRET")
+    except Exception:
+        username = "admin"
+        password = None
+        session_secret = None
+
+    server = create_server(
+        str(settings.database_path),
+        host=host,
+        port=port,
+        session_secret=session_secret,
+        project_root=Path.cwd(),
+        bootstrap_username=username,
+        bootstrap_password=password,
+    )
+    print("\nNIMO Shop chưa thể chạy bot Telegram.")
+    print(f"Lý do: {reason}")
+    print(f"Web Admin Setup đang chạy tại: http://127.0.0.1:{port}")
+    print(f"Nếu mở từ máy khác cùng WiFi: http://<IP_MAY_NAY>:{port}")
+    print("Đăng nhập mặc định: admin / admin12345 nếu chưa đặt WEB_ADMIN_PASSWORD.")
+    print("Vào Cấu hình → nhập BOT_TOKEN/ADMIN_IDS/Bank/SePay/Binance → tick 'Ghi ra .env' → Lưu → restart lệnh này.\n")
+    server.serve_forever()
+
+
 async def amain() -> None:
     try:
         from dotenv import load_dotenv
@@ -30,21 +94,32 @@ async def amain() -> None:
         load_dotenv = None
     if load_dotenv:
         load_dotenv()
+    settings = Settings.from_env()
+    db = Database(settings.database_path)
+    db.init()
+
+    if not is_configured_bot_token(settings.bot_token):
+        await asyncio.to_thread(run_setup_web, settings, reason="BOT_TOKEN còn trống hoặc đang là token mẫu/sai định dạng")
+        return
+
     try:
         from aiogram import Bot
     except ImportError as exc:
         raise SystemExit("Thiếu aiogram. Chạy: pip install -r requirements.txt") from exc
-    settings = Settings.from_env()
-    if not settings.bot_token:
-        raise SystemExit("Thiếu BOT_TOKEN trong .env hoặc biến môi trường")
-    db = Database(settings.database_path)
-    db.init()
-    bot = Bot(settings.bot_token)
+    from aiogram.utils.token import TokenValidationError
+
+    try:
+        bot = Bot(settings.bot_token)
+    except TokenValidationError:
+        await asyncio.to_thread(run_setup_web, settings, reason="BOT_TOKEN không hợp lệ theo định dạng BotFather")
+        return
+
     dp = build_dispatcher(settings, db)
     poll_task = None
     if settings.bank_enabled and settings.sepay_api_key:
         poll_task = asyncio.create_task(sepay_poll_loop(settings, PaymentService(db, settings.deposit_expires_minutes)))
     try:
+        print("NIMO Telegram bot đang chạy. Web admin có thể chạy ở terminal khác bằng: PYTHONPATH=src python -m nimo_shop.web.main --host 0.0.0.0 --port 8080")
         await dp.start_polling(bot)
     finally:
         if poll_task:
