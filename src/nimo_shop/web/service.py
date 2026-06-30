@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
+import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from nimo_shop.db import Database, dumps, loads
-from nimo_shop.money import normalize_currency, to_minor
+from nimo_shop.money import fmt_money, normalize_currency, to_minor
 from nimo_shop.services.audit import AuditService
 from nimo_shop.services.catalog import CatalogService
 from nimo_shop.services.finance import FinanceService
 from nimo_shop.services.orders import OrderService
+from nimo_shop.services.notifications import NotificationService
 from nimo_shop.services.payments import PaymentService
 from nimo_shop.services.wallet import WalletService
 from nimo_shop.web.security import hash_password, verify_password
@@ -41,6 +45,20 @@ CREATE TABLE IF NOT EXISTS admin_audit_logs (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(admin_id) REFERENCES admin_accounts(id) ON DELETE SET NULL
 );
+CREATE TABLE IF NOT EXISTS managed_bots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    bot_type TEXT NOT NULL DEFAULT 'shop',
+    token TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    admin_contact TEXT NOT NULL DEFAULT '',
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_managed_bots_enabled ON managed_bots(is_enabled, is_primary, id);
 """
 
 DEFAULT_SETTING_KEYS: dict[str, tuple[str, int]] = {
@@ -239,6 +257,16 @@ class AdminWebService:
             if updated == 0:
                 raise ValueError("product not found")
         self.log(admin_id, "product.update", "product", str(product_id), {"name": data.get("name")})
+        if str(data.get("notify_users") or "").lower() in {"1", "true", "on", "yes"}:
+            product = self.get_product(product_id)
+            title = f"🛍️ Cập nhật sản phẩm: {product['name']}"
+            message = (
+                f"🛍️ <b>Cập nhật sản phẩm</b>\n\n"
+                f"Sản phẩm: <b>{product['name']}</b>\n"
+                f"Giá hiện tại: <b>{fmt_money(int(product['price_minor']), product['currency'])}</b>\n"
+                "Vào bot và bấm 🛒 Mua ngay để xem chi tiết mới nhất."
+            )
+            NotificationService(self.db).queue_product_update(product_id=product_id, title=title, message=message)
 
     def delete_product(self, product_id: int, *, admin_id: int | None = None) -> str:
         """Safely delete a product.
@@ -354,8 +382,38 @@ class AdminWebService:
                 (limit,),
             )]
 
-    def manual_wallet_adjust(self, *, user_id: int, direction: str, currency: str, amount: str, reason: str, admin_id: int | None = None) -> int:
+    def resolve_user_ref(self, user_ref: str, *, create_if_numeric_telegram: bool = False) -> int:
+        """Resolve admin input to an internal users.id.
+
+        Admins usually paste Telegram ID from the bot, not the internal DB ID.
+        Accept internal ID, Telegram ID, @username/username. For credit actions,
+        a numeric Telegram ID can be created if the user has not started the bot
+        yet, preventing raw FOREIGN KEY failures while still keeping DB valid.
+        """
+        ref = str(user_ref or "").strip()
+        if not ref:
+            raise ValueError("Vui lòng nhập User: Telegram ID, username hoặc ID nội bộ")
+        username = ref[1:] if ref.startswith("@") else ref
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT id FROM users WHERE telegram_id=?", (ref,)).fetchone()
+            if row:
+                return int(row["id"])
+            row = conn.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+            if row:
+                return int(row["id"])
+            if ref.isdigit():
+                # Fall back to internal DB id only after trying Telegram ID.
+                row = conn.execute("SELECT id FROM users WHERE id=?", (int(ref),)).fetchone()
+                if row:
+                    return int(row["id"])
+                if create_if_numeric_telegram:
+                    cur = conn.execute("INSERT INTO users(telegram_id, username, full_name) VALUES(?,?,?)", (ref, None, None))
+                    return int(cur.lastrowid)
+        raise ValueError("Không tìm thấy người dùng. Hãy nhập Telegram ID đúng hoặc yêu cầu khách bấm /start trước.")
+
+    def manual_wallet_adjust(self, *, user_ref: str, direction: str, currency: str, amount: str, reason: str, admin_id: int | None = None) -> int:
         amount_minor = to_minor(amount, currency)
+        user_id = self.resolve_user_ref(user_ref, create_if_numeric_telegram=(direction == "credit"))
         key = f"web-wallet-{direction}:{user_id}:{currency}:{amount_minor}:{reason}:{secrets.token_hex(4)}"
         service = WalletService(self.db)
         if direction == "credit":
@@ -363,8 +421,8 @@ class AdminWebService:
         elif direction == "debit":
             balance = service.debit(user_id, currency, amount_minor, reason=reason, idempotency_key=key)
         else:
-            raise ValueError("invalid wallet direction")
-        self.log(admin_id, f"wallet.{direction}", "user", str(user_id), {"currency": currency, "amount_minor": amount_minor, "reason": reason})
+            raise ValueError("Loại điều chỉnh ví không hợp lệ")
+        self.log(admin_id, f"wallet.{direction}", "user", str(user_id), {"currency": currency, "amount_minor": amount_minor, "reason": reason, "input": user_ref})
         return balance
 
     def list_payment_intents(self, limit: int = 100) -> list[dict]:
@@ -449,6 +507,161 @@ class AdminWebService:
             lines.append(f"{key}={escaped}\n")
         target.write_text("".join(lines), encoding="utf-8")
         return target
+
+    def search_products(self, query: str, limit: int = 50) -> list[dict]:
+        return CatalogService(self.db).search_products(query, limit=limit)
+
+    def list_notifications(self, limit: int = 100) -> list[dict]:
+        with self.db.connect() as conn:
+            return [dict(r) for r in conn.execute("SELECT * FROM bot_notifications ORDER BY id DESC LIMIT ?", (limit,))]
+
+    def create_notification(self, *, title: str, message: str, product_id: int | None = None, admin_id: int | None = None) -> int:
+        if not title.strip() or not message.strip():
+            raise ValueError("Vui lòng nhập tiêu đề và nội dung thông báo")
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                "INSERT INTO bot_notifications(kind, title, message, product_id) VALUES(?,?,?,?)",
+                ("broadcast", title.strip(), message.strip(), product_id),
+            )
+            notification_id = int(cur.lastrowid)
+        self.log(admin_id, "notification.create", "notification", str(notification_id), {"title": title, "product_id": product_id})
+        return notification_id
+
+    def list_managed_bots(self) -> list[dict]:
+        with self.db.connect() as conn:
+            return [dict(r) for r in conn.execute("SELECT * FROM managed_bots ORDER BY is_primary DESC, id DESC")]
+
+    def create_managed_bot(self, data: dict[str, str], *, admin_id: int | None = None) -> int:
+        name = str(data.get("name") or "").strip()
+        token = str(data.get("token") or "").strip()
+        if not name:
+            raise ValueError("Vui lòng nhập tên bot")
+        if not token:
+            raise ValueError("Vui lòng nhập token bot")
+        is_primary = str(data.get("is_primary") or "").lower() in {"1", "true", "on", "yes"}
+        with self.db.transaction() as conn:
+            if is_primary:
+                conn.execute("UPDATE managed_bots SET is_primary=0")
+            cur = conn.execute(
+                """
+                INSERT INTO managed_bots(name, bot_type, token, username, admin_contact, is_primary, is_enabled, notes)
+                VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    name,
+                    str(data.get("bot_type") or "shop").strip() or "shop",
+                    token,
+                    str(data.get("username") or "").strip().lstrip("@"),
+                    str(data.get("admin_contact") or "").strip(),
+                    1 if is_primary else 0,
+                    1 if str(data.get("is_enabled") or "on").lower() in {"1", "true", "on", "yes"} else 0,
+                    str(data.get("notes") or "").strip(),
+                ),
+            )
+            bot_id = int(cur.lastrowid)
+        if is_primary:
+            self.update_settings({"BOT_TOKEN": token}, admin_id=admin_id, write_env=True)
+        self.log(admin_id, "bot.create", "managed_bot", str(bot_id), {"name": name, "primary": is_primary})
+        return bot_id
+
+    def update_managed_bot(self, bot_id: int, data: dict[str, str], *, admin_id: int | None = None) -> None:
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise ValueError("Vui lòng nhập tên bot")
+        token = str(data.get("token") or "").strip()
+        is_primary = str(data.get("is_primary") or "").lower() in {"1", "true", "on", "yes"}
+        with self.db.transaction() as conn:
+            old = conn.execute("SELECT * FROM managed_bots WHERE id=?", (bot_id,)).fetchone()
+            if not old:
+                raise ValueError("Không tìm thấy bot")
+            final_token = token or str(old["token"])
+            if is_primary:
+                conn.execute("UPDATE managed_bots SET is_primary=0 WHERE id<>?", (bot_id,))
+            conn.execute(
+                """
+                UPDATE managed_bots
+                   SET name=?, bot_type=?, token=?, username=?, admin_contact=?, is_primary=?, is_enabled=?, notes=?, updated_at=CURRENT_TIMESTAMP
+                 WHERE id=?
+                """,
+                (
+                    name,
+                    str(data.get("bot_type") or "shop").strip() or "shop",
+                    final_token,
+                    str(data.get("username") or "").strip().lstrip("@"),
+                    str(data.get("admin_contact") or "").strip(),
+                    1 if is_primary else 0,
+                    1 if str(data.get("is_enabled") or "").lower() in {"1", "true", "on", "yes"} else 0,
+                    str(data.get("notes") or "").strip(),
+                    bot_id,
+                ),
+            )
+        if is_primary:
+            self.update_settings({"BOT_TOKEN": final_token}, admin_id=admin_id, write_env=True)
+        self.log(admin_id, "bot.update", "managed_bot", str(bot_id), {"name": name, "primary": is_primary})
+
+    def delete_managed_bot(self, bot_id: int, *, admin_id: int | None = None) -> None:
+        with self.db.transaction() as conn:
+            row = conn.execute("DELETE FROM managed_bots WHERE id=?", (bot_id,)).rowcount
+            if row == 0:
+                raise ValueError("Không tìm thấy bot")
+        self.log(admin_id, "bot.delete", "managed_bot", str(bot_id), {})
+
+    def list_backups(self) -> list[dict]:
+        backup_dir = self.project_root / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        rows: list[dict] = []
+        for file in sorted(backup_dir.glob("nimo-backup-*.zip"), reverse=True):
+            rows.append({"name": file.name, "path": str(file), "size": file.stat().st_size, "created_at": datetime.fromtimestamp(file.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")})
+        return rows
+
+    def create_backup(self, *, include_env: bool = True, admin_id: int | None = None) -> Path:
+        backup_dir = self.project_root / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = backup_dir / f"nimo-backup-{stamp}.zip"
+        db_path = Path(self.db.path)
+        if not db_path.exists():
+            raise ValueError(f"Không tìm thấy database: {db_path}")
+        tmp_db = backup_dir / f"shop-{stamp}.db"
+        # Use sqlite backup API instead of copying a hot WAL database directly.
+        import sqlite3
+        src = sqlite3.connect(str(db_path))
+        dst = sqlite3.connect(str(tmp_db))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close(); src.close()
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(tmp_db, "data/shop.db")
+            env_path = self.project_root / ".env"
+            if include_env and env_path.exists():
+                zf.write(env_path, ".env")
+            zf.writestr("RESTORE_GUIDE.txt", "Giải nén file này vào thư mục dự án hoặc dùng trang Backup/Restore của Web Admin. File chính: data/shop.db. Không chia sẻ backup nếu có .env vì chứa token/API key.\n")
+        tmp_db.unlink(missing_ok=True)
+        self.log(admin_id, "backup.create", "backup", target.name, {"include_env": include_env, "size": target.stat().st_size})
+        return target
+
+    def restore_backup(self, backup_path: str, *, admin_id: int | None = None) -> None:
+        path = Path(backup_path).expanduser()
+        if not path.is_absolute():
+            path = self.project_root / path
+        if not path.exists() or path.suffix.lower() != ".zip":
+            raise ValueError("File backup không tồn tại hoặc không phải .zip")
+        db_path = Path(self.db.path)
+        with zipfile.ZipFile(path) as zf:
+            names = set(zf.namelist())
+            if "data/shop.db" not in names:
+                raise ValueError("Backup không chứa data/shop.db")
+            safety = self.create_backup(include_env=True, admin_id=admin_id)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = db_path.with_suffix(".restore-tmp")
+            with zf.open("data/shop.db") as src, tmp.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            tmp.replace(db_path)
+            if ".env" in names:
+                with zf.open(".env") as src, (self.project_root / ".env").open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        self.log(admin_id, "backup.restore", "backup", str(path), {"safety_backup": str(safety)})
 
     def audit(self) -> list[dict]:
         return [{"code": issue.code, "message": issue.message} for issue in AuditService(self.db).run()]

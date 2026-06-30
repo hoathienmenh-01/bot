@@ -4,17 +4,28 @@ from collections.abc import Iterable
 from html import escape
 
 from nimo_shop.money import fmt_money
+from nimo_shop.bot.i18n import SUPPORTED_LANGUAGES, language_display, t, normalize_lang
 
 
 def h(value: object) -> str:
     return escape(str(value), quote=False)
 
 
-def welcome(shop_name: str) -> str:
-    return (
-        f"👋 Chào mừng bạn đến với <b>{h(shop_name)}</b>\n\n"
-        "Bạn có thể mua gói premium/tài khoản/key, nạp ví, xem lịch sử mua và liên hệ hỗ trợ ngay trong bot.\n\n"
-        "Vui lòng chọn chức năng bên dưới:"
+def _wallet_block(balances: dict[str, int] | None, lang: str | None = "vi") -> str:
+    title = t(lang, "wallet_block_title")
+    if balances:
+        lines = [title]
+        for cur, amount in balances.items():
+            lines.append(f"- {h(cur)}: <b>{fmt_money(int(amount), cur)}</b>")
+        return "\n".join(lines)
+    return f"{title}\n- {h(t(lang, 'no_balance'))}"
+
+
+def welcome(shop_name: str, balances: dict[str, int] | None = None, lang: str | None = "vi") -> str:
+    lang = normalize_lang(lang)
+    return t(lang, "welcome").format(
+        shop_name=h(shop_name),
+        wallet_block=_wallet_block(balances or {}, lang),
     )
 
 
@@ -64,16 +75,27 @@ def product_detail(product: dict) -> str:
         f"Tồn kho: <b>{stock}</b>\n"
         f"Trạng thái: {status}\n\n"
         f"📌 <b>Mô tả</b>\n{h(product.get('description') or 'Chưa có mô tả')}\n\n"
-        f"🛡 <b>Bảo hành</b>\n{h(product.get('warranty_text') or 'Theo chính sách shop')}"
+        f"🛡 <b>Bảo hành</b>\n{h(product.get('warranty_text') or 'Theo chính sách shop')}\n\n"
+        "👇 Chọn số lượng muốn mua bên dưới. Nếu muốn mua số lượng khác, bấm <b>Nhập số lượng khác</b>."
     )
 
 
-def order_created(order: dict) -> str:
+def order_created(order: dict, balances: dict[str, int] | None = None) -> str:
+    current_balance = int((balances or {}).get(order["currency"], 0))
+    total = int(order["total_amount_minor"])
+    missing = max(0, total - current_balance)
+    balance_line = f"Số dư ví hiện tại: <b>{fmt_money(current_balance, order['currency'])}</b>"
+    if missing:
+        balance_line += f"\nCòn thiếu nếu thanh toán bằng ví: <b>{fmt_money(missing, order['currency'])}</b>"
+    else:
+        balance_line += "\n✅ Ví đủ tiền để thanh toán đơn này."
     return (
         f"📦 <b>Đơn hàng {h(order['public_code'])}</b>\n\n"
         f"Sản phẩm: <b>{h(order['product_name'])}</b>\n"
         f"Số lượng: <b>{int(order['quantity'])}</b>\n"
-        f"Tổng tiền: <b>{fmt_money(int(order['total_amount_minor']), order['currency'])}</b>\n"
+        f"Đơn giá: <b>{fmt_money(int(order['unit_amount_minor']), order['currency'])}</b>\n"
+        f"Tổng tiền: <b>{fmt_money(total, order['currency'])}</b>\n"
+        f"{balance_line}\n"
         f"Trạng thái: <b>Chờ thanh toán</b>\n"
         f"Hết hạn: <code>{h(order['expires_at'])}</code>\n\n"
         "Chọn phương thức thanh toán bên dưới. Nếu quá hạn, hàng giữ tạm sẽ tự trả về kho."
@@ -141,7 +163,12 @@ def support(admin_contact: str | None = None) -> str:
 
 
 def language() -> str:
-    return "🌐 <b>Chọn ngôn ngữ</b>\n\nHiện bot hỗ trợ Tiếng Việt và English."
+    lines = ["🌐 <b>Chọn ngôn ngữ</b>", ""]
+    lines.append("Bot hiện hỗ trợ các ngôn ngữ phổ biến dưới đây. Sau khi chọn, menu chính sẽ đổi theo ngôn ngữ đó.")
+    lines.append("")
+    for code in SUPPORTED_LANGUAGES:
+        lines.append(f"- {language_display(code)}")
+    return "\n".join(lines)
 
 
 def admin_help() -> str:
@@ -221,3 +248,30 @@ def pending_orders(rows: list[dict]) -> str:
             f"hết hạn <code>{h(row['expires_at'])}</code>"
         )
     return "\n".join(lines)
+
+
+def search_prompt() -> str:
+    return (
+        "🔎 <b>Tìm kiếm sản phẩm</b>\n\n"
+        "Nhập tên sản phẩm, danh mục hoặc từ khóa cần tìm.\n"
+        "Ví dụ: <code>chatgpt</code>, <code>canva</code>, <code>capcut</code>.\n\n"
+        "Bạn cũng có thể dùng lệnh: <code>/search chatgpt</code>"
+    )
+
+
+def search_results(query: str, products: list[dict]) -> str:
+    if not products:
+        return (
+            f"🔎 <b>Kết quả tìm kiếm</b>\n\n"
+            f"Từ khóa: <code>{h(query)}</code>\n\n"
+            "Không tìm thấy sản phẩm phù hợp. Hãy thử từ khóa ngắn hơn hoặc bấm 🛒 Mua ngay để xem tất cả danh mục."
+        )
+    lines = ["🔎 <b>Kết quả tìm kiếm</b>", "", f"Từ khóa: <code>{h(query)}</code>", ""]
+    for product in products[:20]:
+        stock = int(product.get("available_stock") or 0)
+        lines.append(
+            f"#{product['id']} — <b>{h(product['name'])}</b>\n"
+            f"Giá: <b>{fmt_money(int(product['price_minor']), product['currency'])}</b> · Còn: <b>{stock}</b>"
+        )
+    lines.append("\nBấm nút sản phẩm bên dưới để xem chi tiết/mua hàng.")
+    return "\n\n".join(lines)

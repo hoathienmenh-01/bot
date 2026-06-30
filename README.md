@@ -4,13 +4,32 @@ Bot bán hàng Telegram cho sản phẩm số: tài khoản, key, license, gói 
 
 ## Trạng thái bản này
 
-- Phiên bản: `1.5.0-premium-admin-ui`
+- Phiên bản: `1.7.0-quantity-wallet-language-runall`
 - Core ví/đơn/kho/payment: hoàn thiện ở mức MVP dùng thật cẩn thận.
 - Telegram UI: flow khách hàng và admin cơ bản bằng aiogram 3.
 - Web Admin: quản lý dashboard, đơn hàng, sản phẩm, danh mục, kho, user, ví, dòng tiền, payment, cấu hình, audit, log admin.
 - Giao diện web: responsive, light/dark mode, tiếng Việt/English.
-- Test: `45/45 passed`.
+- Test: `47/47 passed`.
 
+
+
+### Cập nhật v1.7.0 số lượng mua / ví / ngôn ngữ / chạy một lệnh
+
+- Khách có thể chọn nhanh số lượng mua: **Mua 1 / Mua 2 / Mua 3 / Mua 5** theo tồn kho.
+- Khách có thể bấm **Nhập số lượng khác** rồi nhắn số lượng tự do, hoặc dùng lệnh `/mua PRODUCT_ID SO_LUONG`.
+- Khi tạo đơn, bot hiển thị **đơn giá, tổng tiền, số dư ví hiện tại và số tiền còn thiếu** nếu muốn thanh toán bằng ví.
+- Menu `/start` hiển thị số dư ví của khách ngay ở màn hình đầu.
+- Nút thanh toán đơn có thêm **Nạp ví** để khách bổ sung tiền nhanh.
+- Thêm ngôn ngữ phổ biến: Tiếng Việt, English, 中文, 日本語, 한국어, ไทย, Español, Français. Menu chính đổi theo ngôn ngữ đã chọn.
+- Thêm lệnh chạy một lần cả bot và web admin: `PYTHONPATH=src python -m nimo_shop.run_all --host 0.0.0.0 --port 8080` hoặc `./scripts/run_all.sh`.
+
+### Cập nhật v1.6.0 sửa nạp ví/kho/ví thủ công/thông báo
+
+- Khách có thể nạp ví tự do bằng nút **Nạp số tiền khác** hoặc lệnh `/nap 150000`; các mốc cố định vẫn còn để thao tác nhanh.
+- Nhập kho không còn bỏ qua dòng trùng im lặng. Nếu trùng trong textarea hoặc đã có trong sản phẩm, hệ thống báo lỗi và không nhập.
+- Cộng/trừ ví thủ công trong Web Admin chấp nhận **Telegram ID**, **@username** hoặc **ID nội bộ**; nếu cộng tiền cho Telegram ID chưa có hồ sơ, hệ thống tự tạo user tối thiểu.
+- Sửa sản phẩm có checkbox gửi thông báo cập nhật qua bot; web tạo hàng chờ và bot gửi nền khi đang chạy.
+- Xác nhận thanh toán thủ công qua web chỉ xử lý một lần mỗi POST, tiếp tục dùng provider_tx_id để chống cộng tiền 2 lần.
 
 ### Cập nhật v1.5.0 Web Admin Premium
 
@@ -40,11 +59,28 @@ Flow mua hàng:
 → chọn danh mục
 → chọn sản phẩm
 → xem giá / mô tả / tồn kho / bảo hành
-→ ✅ Mua ngay
+→ chọn số lượng muốn mua hoặc nhập số lượng tự do
 → bot tạo đơn và giữ stock tạm
 → chọn thanh toán bằng ví / ngân hàng / Binance
 → nếu thanh toán thành công, bot giao key/tài khoản
 ```
+
+## Chạy bot + web admin bằng một lệnh
+
+Trên máy tính hoặc Termux, sau khi đã cài requirements và có `.env`:
+
+```bash
+PYTHONPATH=src python -m nimo_shop.run_all --host 0.0.0.0 --port 8080
+```
+
+Hoặc:
+
+```bash
+chmod +x scripts/run_all.sh
+./scripts/run_all.sh
+```
+
+Lệnh này mở Web Admin tại `http://127.0.0.1:8080` và chạy bot Telegram trong cùng một tiến trình. Nếu `BOT_TOKEN` còn trống/sai, Web Admin vẫn chạy để bạn vào Cấu hình nhập token rồi restart.
 
 ## Web Admin
 
@@ -306,4 +342,35 @@ You can also run the web admin directly anytime:
 
 ```bash
 PYTHONPATH=src python -m nimo_shop.web.main --host 0.0.0.0 --port 8080
+```
+
+## v1.8 additions
+
+### Customer product search
+Telegram users can search products from the bot menu using `🔎 Tìm sản phẩm` or command:
+
+```text
+/search chatgpt
+/timkiem canva
+```
+
+### Web Admin pages
+- `/bots`: manage multiple bot tokens and choose the primary running bot.
+- `/notifications`: create bot notifications/broadcasts; running bot sends queued messages to users who used `/start`.
+- `/backup`: download/restore backup ZIP for moving data between Android phone and PC.
+- `/guide`: step-by-step BotFather, bank/SePay, Binance, backup and operation guide.
+
+### Backup
+From Web Admin: `Backup dữ liệu` → download backup.
+
+CLI backup:
+
+```bash
+./scripts/backup_data.sh
+```
+
+### One-command run
+
+```bash
+PYTHONPATH=src python -m nimo_shop.run_all --host 0.0.0.0 --port 8080
 ```

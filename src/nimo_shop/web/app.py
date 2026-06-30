@@ -18,7 +18,7 @@ LANG = {
     "vi": {
         "dashboard": "Tổng quan", "orders": "Đơn hàng", "products": "Sản phẩm", "categories": "Danh mục",
         "stock": "Kho hàng", "users": "Người dùng", "wallets": "Ví", "finance": "Dòng tiền",
-        "payments": "Thanh toán", "settings": "Cấu hình", "audit": "Kiểm tra hệ thống", "logs": "Nhật ký admin",
+        "payments": "Thanh toán", "settings": "Cấu hình", "audit": "Kiểm tra hệ thống", "logs": "Nhật ký admin", "bots": "Quản lý bot", "notifications": "Thông báo bot", "backup": "Backup dữ liệu", "guide": "Hướng dẫn",
         "login": "Đăng nhập", "logout": "Đăng xuất", "save": "Lưu thay đổi", "create": "Tạo mới",
         "import_stock": "Nhập kho", "confirm_payment": "Xác nhận thanh toán", "light": "Sáng", "dark": "Tối",
         "language": "Ngôn ngữ", "theme": "Giao diện", "welcome": "Trang quản lý NIMO Shop",
@@ -28,7 +28,7 @@ LANG = {
     "en": {
         "dashboard": "Dashboard", "orders": "Orders", "products": "Products", "categories": "Categories",
         "stock": "Inventory", "users": "Users", "wallets": "Wallets", "finance": "Finance",
-        "payments": "Payments", "settings": "Settings", "audit": "System Audit", "logs": "Admin Logs",
+        "payments": "Payments", "settings": "Settings", "audit": "System Audit", "logs": "Admin Logs", "bots": "Bot Manager", "notifications": "Bot Notifications", "backup": "Data Backup", "guide": "Guide",
         "login": "Login", "logout": "Logout", "save": "Save changes", "create": "Create",
         "import_stock": "Import stock", "confirm_payment": "Confirm payment", "light": "Light", "dark": "Dark",
         "language": "Language", "theme": "Theme", "welcome": "NIMO Shop Admin",
@@ -40,7 +40,8 @@ LANG = {
 NAV = [
     ("/", "dashboard"), ("/orders", "orders"), ("/products", "products"), ("/categories", "categories"),
     ("/stock", "stock"), ("/users", "users"), ("/wallets", "wallets"), ("/finance", "finance"),
-    ("/payments", "payments"), ("/settings", "settings"), ("/audit", "audit"), ("/logs", "logs"),
+    ("/payments", "payments"), ("/bots", "bots"), ("/notifications", "notifications"),
+    ("/backup", "backup"), ("/settings", "settings"), ("/guide", "guide"), ("/audit", "audit"), ("/logs", "logs"),
 ]
 
 SETTING_GROUPS = [
@@ -255,7 +256,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                 cookies.append(f"nimo_theme={query['theme'][0]}; Path=/; SameSite=Lax")
             if "lang" in query:
                 cookies.append(f"nimo_lang={query['lang'][0]}; Path=/; SameSite=Lax")
-            if cookies and parsed.path in {"/", "/orders", "/products", "/categories", "/stock", "/users", "/wallets", "/finance", "/payments", "/settings", "/audit", "/logs"}:
+            if cookies and parsed.path in {"/", "/orders", "/products", "/categories", "/stock", "/users", "/wallets", "/finance", "/payments", "/settings", "/audit", "/logs", "/bots", "/notifications", "/backup", "/guide"}:
                 self._redirect(parsed.path, cookies)
                 return
         if parsed.path == "/static/style.css":
@@ -269,6 +270,15 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return
         session = self._require_login()
         if not session:
+            return
+        if parsed.path == "/backup/download":
+            try:
+                include_env = parse_qs(parsed.query).get("include_env", ["1"])[0] != "0"
+                backup_path = self.service.create_backup(include_env=include_env, admin_id=session.admin_id)
+                data = backup_path.read_bytes()
+                self._send(data, content_type="application/zip", headers={"Content-Disposition": f"attachment; filename={backup_path.name}"})
+            except Exception as exc:
+                self._send(self._page("backup", "", active="/backup", error=str(exc)), status=500)
             return
         try:
             html_body = self._route_get(parsed.path, parse_qs(parsed.query))
@@ -319,6 +329,14 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return self._page("finance", self._finance(), active="/finance")
         if path == "/payments":
             return self._page("payments", self._payments(), active="/payments")
+        if path == "/bots":
+            return self._page("bots", self._bots(), active="/bots")
+        if path == "/notifications":
+            return self._page("notifications", self._notifications(), active="/notifications")
+        if path == "/backup":
+            return self._page("backup", self._backup(), active="/backup")
+        if path == "/guide":
+            return self._page("guide", self._guide(), active="/guide")
         if path == "/settings":
             return self._page("settings", self._settings(), active="/settings")
         if path == "/audit":
@@ -354,11 +372,27 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             self.service.refund_order(int(form["order_id"]), admin_id=admin_id)
             return "/orders"
         if path == "/wallets/adjust":
-            self.service.manual_wallet_adjust(user_id=int(form["user_id"]), direction=form["direction"], currency=form["currency"], amount=form["amount"], reason=form.get("reason", "web_adjust"), admin_id=admin_id)
+            self.service.manual_wallet_adjust(user_ref=form["user_ref"], direction=form["direction"], currency=form["currency"], amount=form["amount"], reason=form.get("reason", "web_adjust"), admin_id=admin_id)
             return "/wallets"
         if path == "/payments/confirm":
             self.service.confirm_payment(payment_code=form["payment_code"], tx_id=form["tx_id"], amount=form["amount"], currency=form["currency"], provider=form["provider"], admin_id=admin_id)
             return "/payments"
+        if path == "/bots/create":
+            self.service.create_managed_bot(form, admin_id=admin_id)
+            return "/bots"
+        if path == "/bots/update":
+            self.service.update_managed_bot(int(form["id"]), form, admin_id=admin_id)
+            return "/bots"
+        if path == "/bots/delete":
+            self.service.delete_managed_bot(int(form["id"]), admin_id=admin_id)
+            return "/bots"
+        if path == "/notifications/create":
+            pid = int(form["product_id"]) if str(form.get("product_id") or "").isdigit() else None
+            self.service.create_notification(title=form.get("title", ""), message=form.get("message", ""), product_id=pid, admin_id=admin_id)
+            return "/notifications"
+        if path == "/backup/restore":
+            self.service.restore_backup(form.get("backup_path", ""), admin_id=admin_id)
+            return "/backup"
         if path == "/settings":
             values = {key: form.get(key, "") for key in DEFAULT_SETTING_KEYS}
             self.service.update_settings(values, admin_id=admin_id, write_env=form.get("write_env") == "on")
@@ -398,7 +432,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         product = product or {"id": "", "category_id": "", "name": "", "currency": "VND", "price_minor": 0, "cost_minor": 0, "description": "", "warranty_text": "", "is_active": 1}
         active = bool(product.get("is_active", 1))
         hidden_id = f'<input type="hidden" name="id" value="{product["id"]}">' if is_edit else ""
-        return f'''<div class="card"><div class="section-head"><div><h2>{title}</h2><p class="muted">Nhập thông tin khách sẽ nhìn thấy khi mua. Giá vốn chỉ dùng để tính lãi, khách không thấy.</p></div><a class="btn secondary" href="/products">← Quay lại danh sách</a></div><form method="post" action="{action}" class="form-grid">{self._form_csrf()}{hidden_id}<label>Danh mục<select name="category_id">{self._category_options(product.get("category_id") or "")}</select><div class="help">Chọn nhóm sản phẩm hiển thị trong menu Mua ngay.</div></label><label>Tên sản phẩm<input name="name" value="{esc(product.get("name"))}" placeholder="ChatGPT Plus 1 tháng" required><div class="help">Tên càng rõ càng ít khách hỏi lại.</div></label><label>Tiền tệ<select name="currency"><option {selected(product.get("currency"),"VND")}>VND</option><option {selected(product.get("currency"),"USDT")}>USDT</option><option {selected(product.get("currency"),"USD")}>USD</option></select></label><label>Giá bán<input name="price" inputmode="decimal" value="{amount_input(product.get("price_minor"), product.get("currency") or "VND")}" placeholder="150000" required><div class="help">VND nhập số tiền thường, ví dụ 150000.</div></label><label>Giá vốn<input name="cost" inputmode="decimal" value="{amount_input(product.get("cost_minor"), product.get("currency") or "VND")}" placeholder="100000"><div class="help">Dùng để tính lợi nhuận, có thể để 0.</div></label><label>Trạng thái<select name="is_active"><option value="1" {"selected" if active else ""}>Đang bán</option><option value="0" {"selected" if not active else ""}>Ẩn khỏi bot</option></select><div class="help">Ẩn sản phẩm nếu hết hàng hoặc ngừng bán.</div></label><label class="full">Mô tả sản phẩm<textarea name="description" placeholder="Tài khoản dùng 30 ngày, giao tự động sau khi thanh toán...">{esc(product.get("description") or "")}</textarea></label><label class="full">Chính sách bảo hành<textarea name="warranty_text" placeholder="Bảo hành 1 đổi 1 trong 30 ngày nếu lỗi do shop...">{esc(product.get("warranty_text") or "")}</textarea></label><div class="full toolbar"><button>{button}</button><a class="btn secondary" href="/products">Hủy</a></div></form></div>'''
+        return f'''<div class="card"><div class="section-head"><div><h2>{title}</h2><p class="muted">Nhập thông tin khách sẽ nhìn thấy khi mua. Giá vốn chỉ dùng để tính lãi, khách không thấy.</p></div><a class="btn secondary" href="/products">← Quay lại danh sách</a></div><form method="post" action="{action}" class="form-grid">{self._form_csrf()}{hidden_id}<label>Danh mục<select name="category_id">{self._category_options(product.get("category_id") or "")}</select><div class="help">Chọn nhóm sản phẩm hiển thị trong menu Mua ngay.</div></label><label>Tên sản phẩm<input name="name" value="{esc(product.get("name"))}" placeholder="ChatGPT Plus 1 tháng" required><div class="help">Tên càng rõ càng ít khách hỏi lại.</div></label><label>Tiền tệ<select name="currency"><option {selected(product.get("currency"),"VND")}>VND</option><option {selected(product.get("currency"),"USDT")}>USDT</option><option {selected(product.get("currency"),"USD")}>USD</option></select></label><label>Giá bán<input name="price" inputmode="decimal" value="{amount_input(product.get("price_minor"), product.get("currency") or "VND")}" placeholder="150000" required><div class="help">VND nhập số tiền thường, ví dụ 150000.</div></label><label>Giá vốn<input name="cost" inputmode="decimal" value="{amount_input(product.get("cost_minor"), product.get("currency") or "VND")}" placeholder="100000"><div class="help">Dùng để tính lợi nhuận, có thể để 0.</div></label><label>Trạng thái<select name="is_active"><option value="1" {"selected" if active else ""}>Đang bán</option><option value="0" {"selected" if not active else ""}>Ẩn khỏi bot</option></select><div class="help">Ẩn sản phẩm nếu hết hàng hoặc ngừng bán.</div></label><label class="full">Mô tả sản phẩm<textarea name="description" placeholder="Tài khoản dùng 30 ngày, giao tự động sau khi thanh toán...">{esc(product.get("description") or "")}</textarea></label><label class="full">Chính sách bảo hành<textarea name="warranty_text" placeholder="Bảo hành 1 đổi 1 trong 30 ngày nếu lỗi do shop...">{esc(product.get("warranty_text") or "")}</textarea></label>{("<label class='full checkbox-row'><input type='checkbox' name='notify_users' checked> Gửi thông báo cập nhật sản phẩm trên bot cho khách đã từng dùng bot</label>" if is_edit else "")}<div class="full toolbar"><button>{button}</button><a class="btn secondary" href="/products">Hủy</a></div></form></div>'''
 
     def _products(self, query: dict[str, list[str]]) -> str:
         if query.get("new", [""])[0]:
@@ -446,7 +480,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
 
     def _wallets(self) -> str:
         rows = "".join(f'<tr><td>{w["user_id"]}</td><td>@{esc(w["username"] or "")}</td><td>{esc(w["currency"])}</td><td>{money(w["balance_minor"], w["currency"])}</td><td>{esc(w["updated_at"])}</td></tr>' for w in self.service.list_wallets())
-        form = f'<div class="card"><h3>Cộng/trừ ví thủ công</h3><p class="muted">Chỉ dùng khi cần hỗ trợ khách hoặc đối soát giao dịch sai nội dung.</p><form method="post" action="/wallets/adjust" class="form-grid">{self._form_csrf()}<label>User ID<input name="user_id" required placeholder="ID nội bộ trong bảng người dùng"></label><label>Loại<select name="direction"><option value="credit">Cộng tiền</option><option value="debit">Trừ tiền</option></select></label><label>Tiền tệ<select name="currency"><option>VND</option><option>USDT</option><option>USD</option></select></label><label>Số tiền<input name="amount" required placeholder="100000"></label><label class="full">Lý do<input name="reason" value="web_admin_adjust"></label><button>Lưu thay đổi ví</button></form></div>'
+        form = f'<div class="card"><h3>Cộng/trừ ví thủ công</h3><p class="muted">Có thể nhập Telegram ID khách, @username hoặc ID nội bộ. Nếu khách chưa bấm /start, cộng ví bằng Telegram ID sẽ tự tạo hồ sơ tối thiểu để không lỗi FOREIGN KEY.</p><form method="post" action="/wallets/adjust" class="form-grid">{self._form_csrf()}<label>Người dùng<input name="user_ref" required placeholder="Telegram ID / @username / ID nội bộ"><div class="help">Khuyến nghị dán Telegram ID khách từ hồ sơ/bot, không cần tìm ID nội bộ.</div></label><label>Loại<select name="direction"><option value="credit">Cộng tiền</option><option value="debit">Trừ tiền</option></select></label><label>Tiền tệ<select name="currency"><option>VND</option><option>USDT</option><option>USD</option></select></label><label>Số tiền<input name="amount" required placeholder="100000"><div class="help">VND nhập 100000; USDT/USD có thể nhập 10.5.</div></label><label class="full">Lý do<input name="reason" value="web_admin_adjust"></label><button>Lưu thay đổi ví</button></form></div>'
         return form + '<div class="card table-wrap"><table class="premium-table"><tr><th>User ID</th><th>Username</th><th>Tiền tệ</th><th>Số dư</th><th>Cập nhật</th></tr>' + rows + '</table></div>'
 
     def _finance(self) -> str:
@@ -489,6 +523,73 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             open_attr = " open" if idx == 0 else ""
             groups.append(f'''<details class="setup-section"{open_attr}><summary><span>{esc(group["title"])}</span><span class="muted">Mở/đóng</span></summary><div class="setup-content"><p class="muted">{esc(group["desc"])}</p><div class="form-grid">{fields}</div></div></details>''')
         return f'''<div class="hint-box"><b>Hướng dẫn cấu hình:</b><br>1) Nhập Bot Token và Telegram ID admin trước. 2) Nếu dùng ngân hàng, bật Bank và nhập Bank BIN/Số tài khoản/Chủ tài khoản/SePay API key. 3) Tick “Ghi ra file .env”. 4) Lưu xong restart bot/web để áp dụng biến môi trường.</div><div class="card"><form method="post" action="/settings">{self._form_csrf()}{"".join(groups)}<label style="display:flex;gap:10px;align-items:center;font-weight:800"><input style="width:auto;margin:0" type="checkbox" name="write_env"> Ghi ra file .env để áp dụng sau khi restart bot/web</label><br><button>{tr(self._theme_lang()[0],"save")}</button></form></div>'''
+
+    def _bots(self) -> str:
+        rows = []
+        for b in self.service.list_managed_bots():
+            primary = '<span class="status delivered">Bot chính</span>' if b["is_primary"] else '<span class="status pending">Bot phụ</span>'
+            enabled = '<span class="status active">Đang bật</span>' if b["is_enabled"] else '<span class="status inactive">Đã tắt</span>'
+            rows.append(f"""
+            <details class="setup-section"><summary><span>🤖 {esc(b['name'])} {primary} {enabled}</span><span class="muted">Sửa</span></summary>
+            <div class="setup-content">
+            <form method="post" action="/bots/update" class="form-grid">{self._form_csrf()}<input type="hidden" name="id" value="{b['id']}">
+                <label>Tên bot<input name="name" value="{esc(b['name'])}" required></label>
+                <label>Loại bot<select name="bot_type"><option value="shop" {selected(b['bot_type'],'shop')}>Bot shop bán hàng</option><option value="binance" {selected(b['bot_type'],'binance')}>Bot Binance/crypto</option><option value="support" {selected(b['bot_type'],'support')}>Bot hỗ trợ</option></select></label>
+                <label class="full">Bot token<input type="password" name="token" placeholder="Để trống nếu không đổi token"><div class="help">Lấy từ @BotFather. Để trống nếu không đổi token cũ.</div></label>
+                <label>Username bot<input name="username" value="{esc(b['username'])}" placeholder="tenbot_bot"></label>
+                <label>Admin liên hệ<input name="admin_contact" value="{esc(b['admin_contact'])}" placeholder="@username"></label>
+                <label class="checkbox-row"><input type="checkbox" name="is_primary" {'checked' if b['is_primary'] else ''}> Dùng làm bot chính đang chạy</label>
+                <label class="checkbox-row"><input type="checkbox" name="is_enabled" {'checked' if b['is_enabled'] else ''}> Bật bot này</label>
+                <label class="full">Ghi chú<textarea name="notes" placeholder="Bot bán ChatGPT, bot Binance, bot hỗ trợ...">{esc(b['notes'])}</textarea></label>
+                <div class="full action-row"><button>Lưu bot</button></form><form method="post" action="/bots/delete" onsubmit="return confirm('Xóa bot này khỏi danh sách quản lý?');">{self._form_csrf()}<input type="hidden" name="id" value="{b['id']}"><button class="danger">Xóa khỏi quản lý</button></form></div>
+            </div></details>""")
+        form = f"""
+        <div class="hint-box"><b>Quản lý nhiều bot:</b><br>
+        Bạn có thể lưu nhiều bot token ở đây: bot shop chính, bot Binance/crypto, bot hỗ trợ. Bot được đánh dấu <b>Bot chính</b> sẽ ghi token vào cấu hình BOT_TOKEN khi lưu và chạy bằng lệnh <code>run_all</code>.</div>
+        <div class="card"><h2>＋ Thêm bot mới</h2><form method="post" action="/bots/create" class="form-grid">{self._form_csrf()}
+            <label>Tên bot<input name="name" placeholder="NIMO Shop Bot" required><div class="help">Tên để bạn dễ phân biệt trong quản trị.</div></label>
+            <label>Loại bot<select name="bot_type"><option value="shop">Bot shop bán hàng</option><option value="binance">Bot Binance/crypto</option><option value="support">Bot hỗ trợ</option></select></label>
+            <label class="full">Bot token<input type="password" name="token" placeholder="123456789:AA..." required><div class="help">Vào @BotFather → /newbot hoặc /mybots → API Token.</div></label>
+            <label>Username bot<input name="username" placeholder="nimoshop_bot"></label>
+            <label>Admin liên hệ<input name="admin_contact" placeholder="@xuantoi"></label>
+            <label class="checkbox-row"><input type="checkbox" name="is_primary"> Đặt làm bot chính</label>
+            <label class="checkbox-row"><input type="checkbox" name="is_enabled" checked> Bật bot</label>
+            <label class="full">Ghi chú<textarea name="notes" placeholder="Bot này dùng cho shop chính / Binance / hỗ trợ..."></textarea></label>
+            <button>Thêm bot</button>
+        </form></div>"""
+        return form + ''.join(rows)
+
+    def _notifications(self) -> str:
+        products = self.service.list_products()
+        opts = '<option value="">Tất cả / không gắn sản phẩm</option>' + ''.join(f'<option value="{p["id"]}">#{p["id"]} {esc(p["name"])}</option>' for p in products)
+        form = f"""
+        <div class="card"><h2>📣 Tạo thông báo bot</h2><p class="muted">Thông báo sẽ vào hàng chờ. Tiến trình bot Telegram đang chạy sẽ gửi cho các user đã từng /start.</p>
+        <form method="post" action="/notifications/create" class="form-grid">{self._form_csrf()}
+            <label>Tiêu đề<input name="title" placeholder="Cập nhật sản phẩm / Khuyến mãi" required></label>
+            <label>Gắn với sản phẩm<select name="product_id">{opts}</select></label>
+            <label class="full">Nội dung gửi trên bot<textarea name="message" placeholder="🎁 Khuyến mãi hôm nay..." required></textarea><div class="help">Có thể dùng HTML Telegram cơ bản như &lt;b&gt;...&lt;/b&gt;, &lt;code&gt;...&lt;/code&gt;.</div></label>
+            <button>Tạo thông báo</button>
+        </form></div>"""
+        rows = ''.join(f'<tr><td>{n["id"]}</td><td>{esc(n["kind"])}</td><td>{esc(n["title"])}</td><td>{status_badge(n["status"])}</td><td>{n["sent_count"]}</td><td>{esc(n["error"] or "")}</td><td>{esc(n["created_at"])}</td></tr>' for n in self.service.list_notifications())
+        return form + '<div class="card table-wrap"><table class="premium-table"><tr><th>ID</th><th>Loại</th><th>Tiêu đề</th><th>Trạng thái</th><th>Đã gửi</th><th>Lỗi</th><th>Ngày</th></tr>' + rows + '</table></div>'
+
+    def _backup(self) -> str:
+        rows = ''.join(f'<tr><td>{esc(b["name"])}</td><td>{b["size"]//1024} KB</td><td>{esc(b["created_at"])}</td><td><code>{esc(b["path"])}</code></td></tr>' for b in self.service.list_backups())
+        return f"""
+        <div class="hint-box"><b>Backup/Restore dữ liệu:</b><br>
+        Backup chứa <code>data/shop.db</code> và có thể chứa <code>.env</code>. Dùng để chuyển từ điện thoại sang máy tính hoặc ngược lại. Không chia sẻ file backup nếu có .env vì chứa token/API key.</div>
+        <div class="grid2"><div class="card"><h2>⬇️ Tải backup</h2><p class="muted">Tạo file ZIP mới từ database đang chạy bằng SQLite backup API, an toàn hơn copy nóng file DB.</p><div class="action-row"><a class="btn" href="/backup/download?include_env=1">Tải backup gồm .env</a><a class="btn secondary" href="/backup/download?include_env=0">Chỉ tải database</a></div></div>
+        <div class="card danger-zone"><h2>♻️ Restore backup</h2><p class="muted">Chỉ dùng khi bạn chắc chắn. Hệ thống sẽ tự tạo safety backup trước khi ghi đè.</p><form method="post" action="/backup/restore">{self._form_csrf()}<label>Đường dẫn file backup trên máy/điện thoại<input name="backup_path" placeholder="backups/nimo-backup-YYYYMMDD-HHMMSS.zip" required></label><br><button class="danger">Restore từ file này</button></form></div></div>
+        <div class="card table-wrap"><h3>Backup đã tạo</h3><table class="premium-table"><tr><th>File</th><th>Dung lượng</th><th>Ngày</th><th>Đường dẫn</th></tr>{rows}</table></div>"""
+
+    def _guide(self) -> str:
+        return '''
+        <div class="card"><h2>1. Tạo bot với BotFather</h2><ol><li>Mở Telegram → tìm <b>@BotFather</b>.</li><li>Gửi <code>/newbot</code>, đặt tên và username kết thúc bằng <code>bot</code>.</li><li>Copy token dạng <code>123456789:AA...</code>.</li><li>Vào <b>Quản lý bot</b> hoặc <b>Cấu hình</b> dán token, lưu và restart lệnh chạy.</li></ol></div>
+        <div class="card"><h2>2. Liên kết ngân hàng Việt Nam / SePay</h2><ol><li>Chọn ngân hàng nhận tiền, nhập Bank BIN, số tài khoản, tên chủ tài khoản.</li><li>Nếu chỉ muốn xác nhận thủ công, không cần SePay API key.</li><li>Nếu muốn tự nhận tiền, tạo tài khoản SePay, liên kết ngân hàng, lấy API key và dán vào Cấu hình.</li><li>Test bằng giao dịch nhỏ 10.000đ trước khi mở bán.</li></ol></div>
+        <div class="card"><h2>3. Binance / USDT</h2><ol><li>Nếu chưa có merchant API, tạm để Binance tắt và dùng xác nhận thủ công.</li><li>Nếu có Binance Pay merchant, nhập API key/secret, return URL và webhook HTTPS.</li><li>Chạy bot trên điện thoại thì chưa nên bật webhook public nếu không có domain HTTPS.</li></ol></div>
+        <div class="card"><h2>4. Chuyển dữ liệu điện thoại ↔ máy tính</h2><ol><li>Vào <b>Backup dữ liệu</b> → tải backup.</li><li>Copy file ZIP sang máy mới.</li><li>Cài dự án, mở Web Admin → Backup → Restore bằng đường dẫn file.</li><li>Chạy Audit sau khi restore.</li></ol></div>
+        <div class="card"><h2>5. Vận hành hằng ngày</h2><ol><li>Chạy một lệnh: <code>PYTHONPATH=src python -m nimo_shop.run_all --host 0.0.0.0 --port 8080</code></li><li>Thêm/sửa sản phẩm, nhập kho, tạo thông báo từ Web Admin.</li><li>Cuối ngày vào Audit và Backup.</li></ol></div>
+        '''
 
     def _audit(self) -> str:
         issues = self.service.audit()

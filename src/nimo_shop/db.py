@@ -160,6 +160,35 @@ CREATE TABLE IF NOT EXISTS support_tickets (
     FOREIGN KEY(user_id) REFERENCES users(id),
     FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE SET NULL
 );
+CREATE TABLE IF NOT EXISTS bot_notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    product_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','failed')),
+    sent_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    sent_at TEXT,
+    FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bot_notifications_status ON bot_notifications(status, id);
+
+CREATE TABLE IF NOT EXISTS managed_bots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    bot_type TEXT NOT NULL DEFAULT 'shop',
+    token TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    admin_contact TEXT NOT NULL DEFAULT '',
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_managed_bots_enabled ON managed_bots(is_enabled, is_primary, id);
 """
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nimo_shop.bot.i18n import SUPPORTED_LANGUAGES, language_display
+
 MAIN_MENU = [
     ["🛒 Mua ngay", "👤 Hồ sơ"],
     ["📜 Lịch sử mua", "💰 Ví"],
@@ -15,7 +17,7 @@ ADMIN_MENU = [
 TOPUP_AMOUNTS_VND = [50_000, 100_000, 200_000, 500_000]
 
 
-def build_reply_keyboard(rows: list[list[str]]):
+def build_reply_keyboard(rows: list[list[str]], *, placeholder: str = "Chọn chức năng..."):
     try:
         from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
     except ImportError as exc:  # pragma: no cover
@@ -23,7 +25,7 @@ def build_reply_keyboard(rows: list[list[str]]):
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=text) for text in row] for row in rows],
         resize_keyboard=True,
-        input_field_placeholder="Chọn chức năng...",
+        input_field_placeholder=placeholder,
     )
 
 
@@ -51,34 +53,61 @@ def products_keyboard(products: list[dict], category_id: int | None = None):
     return build_inline_keyboard(rows)
 
 
-def product_detail_keyboard(product_id: int, has_stock: bool):
+def product_detail_keyboard_rows(product_id: int, available_stock: int) -> list[list[tuple[str, str]]]:
     rows: list[list[tuple[str, str]]] = []
-    if has_stock:
-        rows.append([("✅ Mua ngay", f"buyprod:{product_id}")])
+    stock = max(0, int(available_stock or 0))
+    if stock > 0:
+        quick = [("✅ Mua 1", f"buyqty:{product_id}:1")]
+        if stock >= 2:
+            quick.append(("Mua 2", f"buyqty:{product_id}:2"))
+        rows.append(quick)
+        more: list[tuple[str, str]] = []
+        if stock >= 3:
+            more.append(("Mua 3", f"buyqty:{product_id}:3"))
+        if stock >= 5:
+            more.append(("Mua 5", f"buyqty:{product_id}:5"))
+        if more:
+            rows.append(more)
+        rows.append([("✍️ Nhập số lượng khác", f"buycustom:{product_id}")])
     rows.append([("⬅️ Danh mục", "buy:categories"), ("🏠 Menu", "menu:main")])
-    return build_inline_keyboard(rows)
+    return rows
+
+
+def product_detail_keyboard(product_id: int, available_stock: int):
+    return build_inline_keyboard(product_detail_keyboard_rows(product_id, available_stock))
 
 
 def order_payment_keyboard(order_id: int):
     return build_inline_keyboard([
         [("💰 Thanh toán bằng ví", f"paywallet:{order_id}")],
-        [("🏦 Chuyển khoản ngân hàng", f"paybank:{order_id}")],
+        [("➕ Nạp ví", "wallet:open"), ("🏦 Chuyển khoản ngân hàng", f"paybank:{order_id}")],
         [("🟡 Binance Pay/USDT", f"paybinance:{order_id}")],
         [("❌ Hủy đơn", f"cancel:{order_id}")],
     ])
 
 
-def wallet_keyboard():
+def wallet_keyboard_rows() -> list[list[tuple[str, str]]]:
     rows = [[(f"➕ Nạp {amount:,}đ".replace(",", "."), f"topupbank:{amount}")] for amount in TOPUP_AMOUNTS_VND]
+    rows.append([("✍️ Nạp số tiền khác", "topupcustom")])
     rows.append([("📜 Lịch sử mua", "history"), ("🏠 Menu", "menu:main")])
-    return build_inline_keyboard(rows)
+    return rows
+
+
+def wallet_keyboard():
+    return build_inline_keyboard(wallet_keyboard_rows())
+
+
+def language_keyboard_rows() -> list[list[tuple[str, str]]]:
+    rows: list[list[tuple[str, str]]] = []
+    items = [(language_display(code), f"lang:{code}") for code in SUPPORTED_LANGUAGES]
+    for idx in range(0, len(items), 2):
+        rows.append(items[idx:idx + 2])
+    rows.append([("🏠 Menu", "menu:main")])
+    return rows
 
 
 def language_keyboard():
-    return build_inline_keyboard([
-        [("🇻🇳 Tiếng Việt", "lang:vi"), ("🇺🇸 English", "lang:en")],
-        [("🏠 Menu", "menu:main")],
-    ])
+    return build_inline_keyboard(language_keyboard_rows())
 
 
 def support_keyboard():
@@ -87,3 +116,15 @@ def support_keyboard():
         [("💰 Lỗi thanh toán", "support:payment"), ("👨‍💻 Gặp admin", "support:admin")],
         [("🏠 Menu", "menu:main")],
     ])
+
+
+def search_results_keyboard(products: list[dict]):
+    rows = [[(f"{p['name']} — còn {int(p.get('available_stock') or 0)}", f"prod:{p['id']}")] for p in products[:20]]
+    rows.append([("🛒 Xem danh mục", "buy:categories"), ("🏠 Menu", "menu:main")])
+    return build_inline_keyboard(rows)
+
+
+def search_results_keyboard_rows(products: list[dict]) -> list[list[tuple[str, str]]]:
+    rows = [[(f"{p['name']} — còn {int(p.get('available_stock') or 0)}", f"prod:{p['id']}")] for p in products[:20]]
+    rows.append([("🛒 Xem danh mục", "buy:categories"), ("🏠 Menu", "menu:main")])
+    return rows

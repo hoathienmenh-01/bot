@@ -14,6 +14,7 @@ from nimo_shop.services.catalog import CatalogService
 from nimo_shop.services.orders import OrderService
 from nimo_shop.services.payments import PaymentService
 from nimo_shop.services.users import UserService
+from nimo_shop.services.notifications import NotificationService
 from nimo_shop.web.app import create_server
 from nimo_shop.web.security import create_session, csrf_token, hash_password, read_session, verify_password, verify_csrf
 from nimo_shop.web.service import AdminWebService
@@ -54,7 +55,9 @@ class WebAdminTest(unittest.TestCase):
             {"category_id": str(cat_id), "name": "ChatGPT Plus", "currency": "VND", "price": "150000", "cost": "100000", "description": "30 ngày", "warranty_text": "1 đổi 1"},
             admin_id=admin_id,
         )
-        inserted = self.web.add_stock(prod_id, "acc1|pass\nacc1|pass\nacc2|pass", admin_id=admin_id)
+        with self.assertRaises(ValueError):
+            self.web.add_stock(prod_id, "acc1|pass\nacc1|pass\nacc2|pass", admin_id=admin_id)
+        inserted = self.web.add_stock(prod_id, "acc1|pass\nacc2|pass", admin_id=admin_id)
         self.assertEqual(inserted, 2)
         self.assertEqual(self.web.counts()["available_stock"], 2)
 
@@ -69,10 +72,12 @@ class WebAdminTest(unittest.TestCase):
                 "description": "30 ngày, đã sửa",
                 "warranty_text": "1 đổi 1",
                 "is_active": "1",
+                "notify_users": "on",
             },
             admin_id=admin_id,
         )
         self.assertEqual(self.web.get_product(prod_id)["name"], "ChatGPT Plus Premium")
+        self.assertEqual(len(NotificationService(self.db).pending()), 1)
 
         temp_prod = self.web.create_product(
             {"category_id": str(cat_id), "name": "Temp Product", "currency": "VND", "price": "1000", "cost": "0", "description": "", "warranty_text": ""},
@@ -83,9 +88,11 @@ class WebAdminTest(unittest.TestCase):
             self.web.get_product(temp_prod)
 
         user_id = UserService(self.db).get_or_create(111, "buyer", "Buyer")
-        self.web.manual_wallet_adjust(user_id=user_id, direction="credit", currency="VND", amount="100000", reason="test_credit", admin_id=admin_id)
+        self.web.manual_wallet_adjust(user_ref="111", direction="credit", currency="VND", amount="100000", reason="test_credit", admin_id=admin_id)
         wallets = self.web.list_wallets()
         self.assertEqual(wallets[0]["balance_minor"], 100_000)
+        self.web.manual_wallet_adjust(user_ref="999777555", direction="credit", currency="VND", amount="50000", reason="new_customer_credit", admin_id=admin_id)
+        self.assertTrue(any(w["telegram_id"] == "999777555" and w["balance_minor"] == 50_000 for w in self.web.list_wallets()))
 
         order = OrderService(self.db).create_order(user_id=user_id, product_id=prod_id)
         intent = PaymentService(self.db).create_order_payment_intent(order_id=order["id"], provider="bank")
@@ -104,8 +111,18 @@ class WebAdminTest(unittest.TestCase):
         env_text_after_blank_secret = (self.root / ".env").read_text(encoding="utf-8")
         self.assertIn("BOT_TOKEN=123456789:AASecretTokenValueForTest", env_text_after_blank_secret)
         self.assertIsNotNone(self.web.authenticate("owner2", "NewStrongPass123"))
+        results = self.web.search_products("chatgpt")
+        self.assertTrue(results)
+        bot_id = self.web.create_managed_bot({"name": "Shop Bot", "token": "123456789:AATestManagedBotTokenValue", "bot_type": "shop", "is_primary": "on", "is_enabled": "on", "username": "shop_bot"}, admin_id=admin_id)
+        self.assertEqual(self.web.list_managed_bots()[0]["id"], bot_id)
+        self.web.update_managed_bot(bot_id, {"name": "Shop Bot 2", "token": "", "bot_type": "shop", "is_primary": "on", "is_enabled": "on", "username": "shop_bot", "notes": "ok"}, admin_id=admin_id)
+        self.assertEqual(self.web.list_managed_bots()[0]["name"], "Shop Bot 2")
+        self.web.create_notification(title="Sale", message="<b>Sale</b> hôm nay", admin_id=admin_id)
+        self.assertTrue(any(n["title"] == "Sale" for n in self.web.list_notifications()))
+        backup = self.web.create_backup(include_env=True, admin_id=admin_id)
+        self.assertTrue(backup.exists())
         self.assertEqual(self.web.audit(), [])
-        self.assertGreaterEqual(len(self.web.audit_logs()), 5)
+        self.assertGreaterEqual(len(self.web.audit_logs()), 9)
 
     def test_http_admin_login_csrf_forms_and_pages(self) -> None:
         server = create_server(
@@ -149,14 +166,39 @@ class WebAdminTest(unittest.TestCase):
             token = re.search(r'name="csrf" value="([a-f0-9]+)"', products).group(1)
             edit_page = opener.open(base + "/products?edit=1").read().decode("utf-8")
             self.assertIn("Sửa sản phẩm", edit_page)
+            self.assertIn("Gửi thông báo cập nhật sản phẩm", edit_page)
             settings_page = opener.open(base + "/settings").read().decode("utf-8")
             self.assertIn("Hướng dẫn cấu hình", settings_page)
             self.assertIn("Bot Token", settings_page)
             self.assertIn("Mã ngân hàng", settings_page)
             self.assertNotIn("Payment intents", settings_page)
+            self.assertIn("Quản lý bot", opener.open(base + "/bots").read().decode("utf-8"))
+            self.assertIn("Tạo thông báo bot", opener.open(base + "/notifications").read().decode("utf-8"))
+            self.assertIn("Backup/Restore dữ liệu", opener.open(base + "/backup").read().decode("utf-8"))
+            self.assertIn("Tạo bot với BotFather", opener.open(base + "/guide").read().decode("utf-8"))
+            backup_resp = opener.open(base + "/backup/download?include_env=0")
+            self.assertEqual(backup_resp.headers.get_content_type(), "application/zip")
             post("/stock/import", {"csrf": token, "product_id": "1", "contents": "key-a\nkey-b"})
             stock = opener.open(base + "/stock").read().decode("utf-8")
             self.assertIn("key-a", stock)
+
+            wallet_page = opener.open(base + "/wallets").read().decode("utf-8")
+            token = re.search(r'name="csrf" value="([a-f0-9]+)"', wallet_page).group(1)
+            post("/wallets/adjust", {"csrf": token, "user_ref": "555666777", "direction": "credit", "currency": "VND", "amount": "25000", "reason": "http_test"})
+            self.assertTrue(any(w["telegram_id"] == "555666777" and w["balance_minor"] == 25_000 for w in self.web.list_wallets()))
+
+            user_id = UserService(self.db).get_or_create(333444555, "paybuyer", "Pay Buyer")
+            order = OrderService(self.db).create_order(user_id=user_id, product_id=1)
+            intent = PaymentService(self.db).create_order_payment_intent(order_id=order["id"], provider="bank")
+            payments_page = opener.open(base + "/payments").read().decode("utf-8")
+            token = re.search(r'name="csrf" value="([a-f0-9]+)"', payments_page).group(1)
+            post("/payments/confirm", {"csrf": token, "payment_code": intent["public_code"], "tx_id": "HTTPPAY001", "amount": "99000", "currency": "VND", "provider": "bank"})
+            with self.db.connect() as conn:
+                event_count = conn.execute("SELECT COUNT(*) AS c FROM external_payment_events WHERE provider_tx_id='HTTPPAY001'").fetchone()["c"]
+                delivered = conn.execute("SELECT status FROM orders WHERE id=?", (order["id"],)).fetchone()["status"]
+            self.assertEqual(event_count, 1)
+            self.assertEqual(delivered, "delivered")
+
             dark = opener.open(base + "/?theme=dark&lang=en").read().decode("utf-8")
             self.assertIn('data-theme="dark"', dark)
         finally:

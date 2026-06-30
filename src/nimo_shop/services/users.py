@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from nimo_shop.db import Database
+from nimo_shop.bot.i18n import normalize_lang, SUPPORTED_LANGUAGES
 
 
 class UserService:
@@ -43,8 +44,13 @@ class UserService:
                 "total_spent_minor": int(orders["total"]),
             }
 
+    def get_language(self, user_id: int) -> str:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT language FROM users WHERE id=?", (user_id,)).fetchone()
+            return normalize_lang(row["language"] if row else "vi")
+
     def set_language(self, user_id: int, language: str) -> None:
-        if language not in {"vi", "en", "zh"}:
+        if language not in SUPPORTED_LANGUAGES:
             raise ValueError("unsupported language")
         with self.db.transaction() as conn:
             conn.execute("UPDATE users SET language=? WHERE id=?", (language, user_id))

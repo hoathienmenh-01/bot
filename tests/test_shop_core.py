@@ -62,11 +62,15 @@ class ShopCoreTest(unittest.TestCase):
         self.assertEqual(summary["available"], 0)
         self.assertEqual(summary["reserved"], 2)
 
-    def test_duplicate_stock_import_is_not_inserted_twice(self) -> None:
-        inserted = self.catalog.add_stock(self.product_id, ["acc2|pass2", "acc3|pass3", "acc3|pass3"])
-        self.assertEqual(inserted, 1)
+    def test_duplicate_stock_import_is_rejected_instead_of_silently_skipped(self) -> None:
+        with self.assertRaises(ValueError):
+            self.catalog.add_stock(self.product_id, ["acc2|pass2", "acc3|pass3"])
+        with self.assertRaises(ValueError):
+            self.catalog.add_stock(self.product_id, ["acc4|pass4", "acc4|pass4"])
         row = self._one("SELECT COUNT(*) AS c FROM stock_items WHERE product_id=?", (self.product_id,))
-        self.assertEqual(row["c"], 3)
+        self.assertEqual(row["c"], 2)
+        inserted = self.catalog.add_stock(self.product_id, ["acc3|pass3"])
+        self.assertEqual(inserted, 1)
 
     def test_wallet_credit_debit_are_idempotent(self) -> None:
         self.assertEqual(self.wallet.credit(self.user_id, "VND", 200_000, reason="manual", idempotency_key="credit-1"), 200_000)

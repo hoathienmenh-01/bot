@@ -10,6 +10,7 @@ from nimo_shop.db import Database
 from nimo_shop.payments.sepay import SepayClient
 from nimo_shop.services.payments import PaymentService
 from nimo_shop.services.provider_sync import apply_sepay_transactions
+from nimo_shop.services.notifications import NotificationService
 
 _TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{20,}$")
 _PLACEHOLDER_TOKENS = {
@@ -33,6 +34,29 @@ def is_configured_bot_token(token: str | None) -> bool:
     if value in _PLACEHOLDER_TOKENS:
         return False
     return bool(_TOKEN_RE.match(value))
+
+
+async def notification_send_loop(bot, db: Database) -> None:
+    service = NotificationService(db)
+    while True:
+        try:
+            pending = await asyncio.to_thread(service.pending, 5)
+            for item in pending:
+                recipients = await asyncio.to_thread(service.recipients, 5000)
+                sent = 0
+                for telegram_id in recipients:
+                    try:
+                        await bot.send_message(telegram_id, item["message"], parse_mode="HTML")
+                        sent += 1
+                        await asyncio.sleep(0.05)
+                    except Exception as exc:  # pragma: no cover - per-user runtime failure
+                        print(f"[notify] cannot send to {telegram_id}: {exc}")
+                await asyncio.to_thread(service.mark_sent, int(item["id"]), sent)
+                if sent:
+                    print(f"[notify] sent notification #{item['id']} to {sent} user(s)")
+        except Exception as exc:  # pragma: no cover - runtime logging only
+            print(f"[notify] loop error: {exc}")
+        await asyncio.sleep(15)
 
 
 async def sepay_poll_loop(settings: Settings, payments: PaymentService) -> None:
@@ -87,7 +111,7 @@ def run_setup_web(settings: Settings, *, reason: str) -> None:
     server.serve_forever()
 
 
-async def amain() -> None:
+async def amain(*, setup_web_on_invalid_token: bool = True) -> None:
     try:
         from dotenv import load_dotenv
     except ImportError:  # pragma: no cover
@@ -99,7 +123,10 @@ async def amain() -> None:
     db.init()
 
     if not is_configured_bot_token(settings.bot_token):
-        await asyncio.to_thread(run_setup_web, settings, reason="BOT_TOKEN còn trống hoặc đang là token mẫu/sai định dạng")
+        if setup_web_on_invalid_token:
+            await asyncio.to_thread(run_setup_web, settings, reason="BOT_TOKEN còn trống hoặc đang là token mẫu/sai định dạng")
+        else:
+            print("NIMO Telegram bot chưa chạy: BOT_TOKEN còn trống hoặc sai định dạng. Web Admin vẫn có thể dùng để cấu hình.")
         return
 
     try:
@@ -111,20 +138,25 @@ async def amain() -> None:
     try:
         bot = Bot(settings.bot_token)
     except TokenValidationError:
-        await asyncio.to_thread(run_setup_web, settings, reason="BOT_TOKEN không hợp lệ theo định dạng BotFather")
+        if setup_web_on_invalid_token:
+            await asyncio.to_thread(run_setup_web, settings, reason="BOT_TOKEN không hợp lệ theo định dạng BotFather")
+        else:
+            print("NIMO Telegram bot chưa chạy: BOT_TOKEN không hợp lệ theo định dạng BotFather. Web Admin vẫn đang chạy.")
         return
 
     dp = build_dispatcher(settings, db)
-    poll_task = None
+    background_tasks = []
     if settings.bank_enabled and settings.sepay_api_key:
-        poll_task = asyncio.create_task(sepay_poll_loop(settings, PaymentService(db, settings.deposit_expires_minutes)))
+        background_tasks.append(asyncio.create_task(sepay_poll_loop(settings, PaymentService(db, settings.deposit_expires_minutes))))
+    background_tasks.append(asyncio.create_task(notification_send_loop(bot, db)))
     try:
         print("NIMO Telegram bot đang chạy. Web admin có thể chạy ở terminal khác bằng: PYTHONPATH=src python -m nimo_shop.web.main --host 0.0.0.0 --port 8080")
         await dp.start_polling(bot)
     finally:
-        if poll_task:
-            poll_task.cancel()
-            await asyncio.gather(poll_task, return_exceptions=True)
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
 
 
 def main() -> None:

@@ -1,46 +1,33 @@
-# CHANGELOG
+# Changelog
 
-## v1.5.0-premium-admin-ui
+## v1.7.0 — Quantity / Wallet Visibility / Languages / One-command Run
 
-- Làm lại Web Admin theo hướng premium, dễ nhìn hơn, nút bấm rõ ràng hơn và responsive tốt hơn.
-- Làm lại trang Cấu hình theo nhóm: Shop/Admin Telegram, Bot Telegram, Ngân hàng & SePay, Binance Pay, Web Admin.
-- Thêm hướng dẫn tiếng Việt chi tiết cho từng ô cấu hình: nhập gì, lấy ở đâu, dùng để làm gì.
-- Secret như BOT_TOKEN/SEPAY/BINANCE không còn hiện ngược ra form; để trống nghĩa là giữ giá trị cũ.
-- Đổi WEB_ADMIN_USERNAME/WEB_ADMIN_PASSWORD trong web có hiệu lực ngay trong database admin, không cần sửa tay.
-- Làm lại trang Sản phẩm: chỉ hiện danh sách sản phẩm và nút Thêm/Sửa/Xóa rõ ràng; form thêm/sửa tách riêng.
-- Thêm xóa sản phẩm an toàn: sản phẩm chưa có lịch sử sẽ xóa thật; sản phẩm đã có đơn/bán hàng sẽ ẩn để giữ audit/doanh thu.
-- Chặn xóa sản phẩm đang có đơn chờ hoặc stock đang được giữ để tránh mất hàng/lệch đơn.
-- Việt hóa các nhãn gây rối trong web admin như Payment intents, Provider events, Cash ledger.
-- Bổ sung test cho sửa/xóa sản phẩm, UI sản phẩm, form cấu hình, bảo toàn secret khi cập nhật settings, đổi mật khẩu web.
-- Full test: 45/45 passed; compileall, seed demo và audit đều OK.
+- Added quantity-aware Telegram purchase flow:
+  - quick buttons for 1/2/3/5 items based on available stock;
+  - custom quantity prompt;
+  - `/mua PRODUCT_ID SO_LUONG` and `/buy PRODUCT_ID QUANTITY` command.
+- Order creation now shows unit price, total price, current wallet balance, and missing wallet amount.
+- Main `/start` menu now shows the user's wallet balance immediately.
+- Order payment keyboard now includes a direct `Nạp ví` action.
+- Added popular user languages: Vietnamese, English, Chinese, Japanese, Korean, Thai, Spanish, French.
+- Main reply menu changes by the selected language; handlers accept all translated menu labels.
+- Added one-command launcher:
+  - `PYTHONPATH=src python -m nimo_shop.run_all --host 0.0.0.0 --port 8080`
+  - `./scripts/run_all.sh`
+- Added regression tests for quantity UI, wallet visibility, supported languages, and menu labels.
 
-## v1.4.0-web-admin
+## v1.6.0 — Payment / Stock / Notify Fixes
 
-- Thêm Web Admin nhẹ, chạy bằng Python stdlib `http.server`, không cần Node/React/FastAPI.
-- Thêm login admin bằng PBKDF2 password hash.
-- Thêm signed session cookie và CSRF token cho POST form.
-- Thêm giao diện hiện đại responsive, hỗ trợ sáng/tối và tiếng Việt/English.
-- Thêm trang Dashboard, Orders, Products, Categories, Stock, Users, Wallets, Finance, Payments, Settings, Audit, Logs.
-- Thêm nhập kho bằng textarea nhiều dòng.
-- Thêm sửa sản phẩm/danh mục bằng form.
-- Thêm xác nhận thanh toán thủ công qua web.
-- Thêm cộng/trừ ví thủ công qua web.
-- Thêm cấu hình bot/bank/SePay/Binance/Web trong web và ghi ra `.env`.
-- Thêm `admin_accounts`, `app_settings`, `admin_audit_logs`.
-- Thêm tests web admin/auth/CSRF/settings/payment.
-- Full test tăng từ 40 lên 43 test.
+- Free amount wallet top-up via `/nap` and custom top-up button.
+- Strict duplicate stock import validation.
+- Product update notification queue for bot broadcast.
+- Manual wallet adjustment now accepts Telegram ID / username / internal ID.
+- Fixed duplicate payment confirmation path in Web Admin.
 
-## v1.3.0-stable
-
-- Bổ sung audit dữ liệu.
-- Chặn user thao tác order không thuộc về mình.
-- Làm sạch reservation khi stock sold.
-- Bổ sung Binance Pay create-order flow.
-
-
-## v1.4.1 - First-run web setup
-
-- Bot launcher no longer crashes when `BOT_TOKEN` is missing, placeholder, or malformed.
-- `python -m nimo_shop.main` now starts Web Admin Setup automatically so admins can configure everything from the browser.
-- `.env.example` now leaves `BOT_TOKEN` blank to avoid aiogram `TokenValidationError` during first-run setup.
-- Added regression tests for first-run setup token validation.
+## v1.8.0 - Search / Backup / Multi-bot Admin
+- Added customer product search in Telegram bot (`🔎 Tìm sản phẩm`, `/search <keyword>`).
+- Added Web Admin pages: Bot Manager, Bot Notifications, Backup/Restore, and step-by-step Guide.
+- Added managed bot records for multiple Telegram bots, including primary bot selection.
+- Added admin broadcast/notification queue managed from Web Admin.
+- Added backup download using SQLite backup API to avoid copying a hot WAL database.
+- Added tests for product search, backup download, managed bot CRUD, and notification queue.

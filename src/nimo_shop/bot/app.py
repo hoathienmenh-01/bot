@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import traceback
 
 from nimo_shop.bot import views
+from nimo_shop.bot.i18n import language_display, menu_rows, menu_texts, t
 from nimo_shop.bot.admin_commands import parse_add_product, parse_add_stock, parse_confirm, parse_one_int_arg
 from nimo_shop.bot.keyboards import (
     ADMIN_MENU,
@@ -15,11 +17,12 @@ from nimo_shop.bot.keyboards import (
     product_detail_keyboard,
     products_keyboard,
     support_keyboard,
+    search_results_keyboard,
     wallet_keyboard,
 )
 from nimo_shop.config import Settings
 from nimo_shop.db import Database
-from nimo_shop.money import fmt_money, from_minor
+from nimo_shop.money import fmt_money, from_minor, to_minor
 from nimo_shop.payments.binance_pay import BinancePayClient, BinancePayConfig
 from nimo_shop.payments.sepay import BankAccount, bank_instruction, vietqr_url
 from nimo_shop.services.audit import AuditService
@@ -47,6 +50,8 @@ def build_dispatcher(settings: Settings, db: Database):
     payments = PaymentService(db, deposit_expires_minutes=settings.deposit_expires_minutes)
     finance = FinanceService(db)
     audit = AuditService(db)
+    pending_quantity_product_by_tg: dict[int, int] = {}
+    pending_search_by_tg: set[int] = set()
 
     def is_admin(telegram_id: int) -> bool:
         return telegram_id in settings.admin_ids
@@ -103,10 +108,12 @@ def build_dispatcher(settings: Settings, db: Database):
             with_balance = conn.execute("SELECT COUNT(DISTINCT user_id) AS c FROM wallet_balances WHERE balance_minor>0").fetchone()["c"]
         return f"👥 <b>Khách hàng</b>\n\nTổng user: <b>{total}</b>\nBị chặn: <b>{banned}</b>\nCó số dư ví: <b>{with_balance}</b>"
 
-    async def send_main_menu(message: Message) -> None:
+    async def send_main_menu(message: Message, user_id: int | None = None) -> None:
+        lang = users.get_language(user_id) if user_id else "vi"
+        balances = wallet.get_balances(user_id) if user_id else {}
         await message.answer(
-            views.welcome(settings.shop_name),
-            reply_markup=build_reply_keyboard(MAIN_MENU),
+            views.welcome(settings.shop_name, balances, lang),
+            reply_markup=build_reply_keyboard(menu_rows(lang), placeholder=t(lang, "input_placeholder")),
             parse_mode="HTML",
         )
 
@@ -114,8 +121,51 @@ def build_dispatcher(settings: Settings, db: Database):
         cats = catalog.list_categories()
         await message.answer(views.category_list(cats), reply_markup=categories_keyboard(cats), parse_mode="HTML")
 
+    async def send_search_results(message: Message, query: str) -> None:
+        products = catalog.search_products(query)
+        await message.answer(
+            views.search_results(query, products),
+            reply_markup=search_results_keyboard(products),
+            parse_mode="HTML",
+        )
+
     async def send_wallet(message: Message, user_id: int) -> None:
         await message.answer(views.wallet(wallet.get_balances(user_id)), reply_markup=wallet_keyboard(), parse_mode="HTML")
+
+    async def send_topup_intent(message: Message, user_id: int, amount_minor: int) -> None:
+        if amount_minor <= 0:
+            await message.answer("❌ Số tiền nạp phải lớn hơn 0.")
+            return
+        intent = payments.create_wallet_topup_intent(user_id=user_id, provider="bank", currency="VND", amount_minor=amount_minor)
+        extra, _qr = payment_extra_for_bank(intent)
+        await message.answer(
+            views.payment_instruction(intent, provider_label="ngân hàng", extra=extra),
+            parse_mode="HTML",
+        )
+    async def create_order_and_show_payment(message: Message, user_id: int, product_id: int, quantity: int) -> None:
+        if quantity <= 0:
+            await message.answer("❌ Số lượng phải lớn hơn 0.")
+            return
+        product = get_product(product_id)
+        if not product:
+            await message.answer("❌ Sản phẩm không tồn tại hoặc đã tắt bán.")
+            return
+        available = int(product.get("available_stock") or 0)
+        if quantity > available:
+            await message.answer(
+                f"❌ Không đủ hàng. Sản phẩm hiện chỉ còn <b>{available}</b>, bạn đang muốn mua <b>{quantity}</b>.",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            order = orders.create_order(user_id=user_id, product_id=product_id, quantity=quantity)
+            balances = wallet.get_balances(user_id)
+            await message.answer(views.order_created(order, balances), reply_markup=order_payment_keyboard(order["id"]), parse_mode="HTML")
+        except OutOfStock:
+            await message.answer("❌ Sản phẩm vừa hết hàng. Vui lòng chọn sản phẩm khác.")
+        except Exception as exc:
+            await message.answer(f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
+
 
     def payment_extra_for_bank(intent: dict) -> tuple[str, str | None]:
         if settings.bank_bin and settings.bank_account and settings.bank_owner:
@@ -142,13 +192,13 @@ def build_dispatcher(settings: Settings, db: Database):
 
     @router.message(CommandStart())
     async def start(message: Message):
-        ensure_user_from_message(message)
-        await send_main_menu(message)
+        user_id = ensure_user_from_message(message)
+        await send_main_menu(message, user_id)
 
     @router.message(Command("menu"))
     async def menu(message: Message):
-        ensure_user_from_message(message)
-        await send_main_menu(message)
+        user_id = ensure_user_from_message(message)
+        await send_main_menu(message, user_id)
 
     @router.message(Command("admin"))
     async def admin(message: Message):
@@ -161,33 +211,98 @@ def build_dispatcher(settings: Settings, db: Database):
             parse_mode="HTML",
         )
 
-    @router.message(F.text == "🛒 Mua ngay")
+    @router.message(F.text.in_(menu_texts("buy")))
     async def buy_now(message: Message):
         ensure_user_from_message(message)
         await send_categories(message)
 
-    @router.message(F.text == "👤 Hồ sơ")
+    @router.message(F.text.in_(menu_texts("search")))
+    async def search_menu(message: Message):
+        ensure_user_from_message(message)
+        pending_search_by_tg.add(int(message.from_user.id))
+        await message.answer(views.search_prompt(), parse_mode="HTML")
+
+    @router.message(Command("search", "timkiem", "find"))
+    async def search_command(message: Message):
+        ensure_user_from_message(message)
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            pending_search_by_tg.add(int(message.from_user.id))
+            await message.answer(views.search_prompt(), parse_mode="HTML")
+            return
+        await send_search_results(message, parts[1].strip())
+
+    @router.message(F.text.in_(menu_texts("profile")))
     async def profile(message: Message):
         ensure_user_from_message(message)
         prof = users.get_profile(message.from_user.id)
-        await message.answer(views.profile(prof or {}, message.from_user.id, message.from_user.username), parse_mode="HTML")
+        await message.answer(views.profile(prof or {}, message.from_user.id, message.from_user.username), reply_markup=wallet_keyboard(), parse_mode="HTML")
 
-    @router.message(F.text == "📜 Lịch sử mua")
+    @router.message(F.text.in_(menu_texts("history")))
     async def history_msg(message: Message):
         user_id = ensure_user_from_message(message)
         await message.answer(views.history(orders.order_history(user_id)), parse_mode="HTML")
 
-    @router.message(F.text == "💰 Ví")
+    @router.message(F.text.in_(menu_texts("wallet")))
     async def wallet_msg(message: Message):
         user_id = ensure_user_from_message(message)
         await send_wallet(message, user_id)
 
-    @router.message(F.text == "💬 Hỗ trợ")
+    @router.message(Command("nap"))
+    async def topup_custom_command(message: Message):
+        user_id = ensure_user_from_message(message)
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "✍️ Nhập số tiền muốn nạp theo mẫu:\n"
+                "<code>/nap 150000</code>\n\n"
+                "Ví dụ: <code>/nap 75000</code>, <code>/nap 250000</code>",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            amount_minor = to_minor(parts[1], "VND")
+            await send_topup_intent(message, user_id, amount_minor)
+        except Exception as exc:
+            await message.answer(f"❌ Số tiền nạp không hợp lệ: <code>{views.h(exc)}</code>", parse_mode="HTML")
+
+    @router.message(Command("mua", "buy"))
+    async def buy_quantity_command(message: Message):
+        user_id = ensure_user_from_message(message)
+        parts = (message.text or "").split()
+        if len(parts) < 3:
+            await message.answer(
+                "🛒 Nhập đúng mẫu: <code>/mua PRODUCT_ID SO_LUONG</code>\n"
+                "Ví dụ: <code>/mua 1 3</code>",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            await create_order_and_show_payment(message, user_id, int(parts[1]), int(parts[2]))
+        except Exception as exc:
+            await message.answer(f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
+
+    @router.message(F.text.regexp(r"^\d{1,6}$"))
+    async def custom_quantity_number(message: Message):
+        user_id = ensure_user_from_message(message)
+        telegram_id = int(message.from_user.id)
+        product_id = pending_quantity_product_by_tg.pop(telegram_id, None)
+        if product_id is None:
+            if telegram_id in pending_search_by_tg:
+                pending_search_by_tg.discard(telegram_id)
+                await send_search_results(message, (message.text or "").strip())
+            return
+        try:
+            await create_order_and_show_payment(message, user_id, product_id, int(message.text or "0"))
+        except Exception as exc:
+            await message.answer(f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
+
+    @router.message(F.text.in_(menu_texts("support")))
     async def support_msg(message: Message):
         ensure_user_from_message(message)
         await message.answer(views.support(settings.support_contact), reply_markup=support_keyboard(), parse_mode="HTML")
 
-    @router.message(F.text == "🌐 Ngôn ngữ")
+    @router.message(F.text.in_(menu_texts("language")))
     async def language_msg(message: Message):
         ensure_user_from_message(message)
         await message.answer(views.language(), reply_markup=language_keyboard(), parse_mode="HTML")
@@ -368,8 +483,8 @@ def build_dispatcher(settings: Settings, db: Database):
 
     @router.callback_query(F.data == "menu:main")
     async def cb_main(callback: CallbackQuery):
-        ensure_user_from_callback(callback)
-        await callback.message.answer(views.welcome(settings.shop_name), reply_markup=build_reply_keyboard(MAIN_MENU), parse_mode="HTML")
+        user_id = ensure_user_from_callback(callback)
+        await send_main_menu(callback.message, user_id)
         await callback.answer()
 
     @router.callback_query(F.data == "buy:categories")
@@ -401,7 +516,7 @@ def build_dispatcher(settings: Settings, db: Database):
         else:
             await callback.message.answer(
                 views.product_detail(product),
-                reply_markup=product_detail_keyboard(product_id, int(product.get("available_stock") or 0) > 0),
+                reply_markup=product_detail_keyboard(product_id, int(product.get("available_stock") or 0)),
                 parse_mode="HTML",
             )
         await callback.answer()
@@ -410,13 +525,30 @@ def build_dispatcher(settings: Settings, db: Database):
     async def cb_buy_product(callback: CallbackQuery):
         user_id = ensure_user_from_callback(callback)
         product_id = int(callback.data.split(":", 1)[1])
-        try:
-            order = orders.create_order(user_id=user_id, product_id=product_id, quantity=1)
-            await callback.message.answer(views.order_created(order), reply_markup=order_payment_keyboard(order["id"]), parse_mode="HTML")
-        except OutOfStock:
-            await callback.message.answer("❌ Sản phẩm vừa hết hàng. Vui lòng chọn sản phẩm khác.")
-        except Exception as exc:
-            await callback.message.answer(f"❌ Không tạo được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
+        await create_order_and_show_payment(callback.message, user_id, product_id, 1)
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("buyqty:"))
+    async def cb_buy_quantity(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        _, product_id_s, quantity_s = callback.data.split(":", 2)
+        await create_order_and_show_payment(callback.message, user_id, int(product_id_s), int(quantity_s))
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("buycustom:"))
+    async def cb_buy_custom_quantity(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        product_id = int(callback.data.split(":", 1)[1])
+        pending_quantity_product_by_tg[int(callback.from_user.id)] = product_id
+        product = get_product(product_id)
+        available = int((product or {}).get("available_stock") or 0)
+        await callback.message.answer(
+            f"✍️ Nhập số lượng muốn mua cho <b>{views.h((product or {}).get('name') or product_id)}</b>.\n"
+            f"Tồn kho hiện tại: <b>{available}</b>.\n\n"
+            f"Bạn có thể nhắn một số, ví dụ: <code>3</code>\n"
+            f"Hoặc dùng lệnh: <code>/mua {product_id} 3</code>",
+            parse_mode="HTML",
+        )
         await callback.answer()
 
     @router.callback_query(F.data.startswith("paywallet:"))
@@ -503,17 +635,29 @@ def build_dispatcher(settings: Settings, db: Database):
             await callback.message.answer("❌ Bạn không có quyền hủy đơn này.")
         await callback.answer()
 
+    @router.callback_query(F.data == "wallet:open")
+    async def cb_wallet_open(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        await send_wallet(callback.message, user_id)
+        await callback.answer()
+
+    @router.callback_query(F.data == "topupcustom")
+    async def cb_topup_custom(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        await callback.message.answer(
+            "✍️ Bạn muốn nạp bao nhiêu?\n\n"
+            "Gửi lệnh theo mẫu: <code>/nap 150000</code>\n"
+            "Có thể nhập số tiền tự do, không bị giới hạn bởi các mức có sẵn.",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+
     @router.callback_query(F.data.startswith("topupbank:"))
     async def cb_topup_bank(callback: CallbackQuery):
         user_id = ensure_user_from_callback(callback)
         amount_minor = int(callback.data.split(":", 1)[1])
         try:
-            intent = payments.create_wallet_topup_intent(user_id=user_id, provider="bank", currency="VND", amount_minor=amount_minor)
-            extra, _qr = payment_extra_for_bank(intent)
-            await callback.message.answer(
-                views.payment_instruction(intent, provider_label="ngân hàng", extra=extra),
-                parse_mode="HTML",
-            )
+            await send_topup_intent(callback.message, user_id, amount_minor)
         except Exception as exc:
             await callback.message.answer(f"❌ Không tạo được lệnh nạp: <code>{views.h(exc)}</code>", parse_mode="HTML")
         await callback.answer()
@@ -530,7 +674,8 @@ def build_dispatcher(settings: Settings, db: Database):
         lang = callback.data.split(":", 1)[1]
         try:
             users.set_language(user_id, lang)
-            await callback.message.answer("✅ Đã cập nhật ngôn ngữ.")
+            await callback.message.answer(t(lang, "language_updated").format(language=language_display(lang)), parse_mode="HTML")
+            await send_main_menu(callback.message, user_id)
         except Exception as exc:
             await callback.message.answer(f"❌ Không đổi được ngôn ngữ: <code>{views.h(exc)}</code>", parse_mode="HTML")
         await callback.answer()
@@ -545,6 +690,16 @@ def build_dispatcher(settings: Settings, db: Database):
             parse_mode="HTML",
         )
         await callback.answer()
+
+    @router.message(F.text)
+    async def pending_search_text(message: Message):
+        ensure_user_from_message(message)
+        telegram_id = int(message.from_user.id)
+        text = (message.text or "").strip()
+        if telegram_id not in pending_search_by_tg or text.startswith("/"):
+            return
+        pending_search_by_tg.discard(telegram_id)
+        await send_search_results(message, text)
 
     @router.errors()
     async def error_handler(event):  # pragma: no cover - runtime safety net

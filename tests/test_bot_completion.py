@@ -6,6 +6,8 @@ from pathlib import Path
 
 from nimo_shop.bot.admin_commands import parse_add_product, parse_add_stock, parse_confirm, parse_one_int_arg
 from nimo_shop.bot import views
+from nimo_shop.bot.i18n import SUPPORTED_LANGUAGES, menu_rows, menu_texts
+from nimo_shop.bot.keyboards import language_keyboard_rows, product_detail_keyboard_rows, wallet_keyboard_rows
 from nimo_shop.db import Database
 from nimo_shop.services.catalog import CatalogService
 from nimo_shop.services.orders import OrderService
@@ -75,6 +77,48 @@ class BotCompletionTest(unittest.TestCase):
         self.assertIn("Số dư ví", views.profile(profile, 999, "buyer"))
         self.assertIn("Lịch sử mua", views.history(self.orders.order_history(self.user_id)))
         self.assertIn("Quản lý dòng tiền", views.finance(__import__("nimo_shop.services.finance", fromlist=["FinanceService"]).FinanceService(self.db).summary()))
+        keyboard_text = str(wallet_keyboard_rows())
+        self.assertIn("Nạp số tiền khác", keyboard_text)
+        self.assertIn("topupcustom", keyboard_text)
+
+
+    def test_quantity_purchase_ui_and_wallet_balance_are_visible(self) -> None:
+        self.catalog.add_stock(self.product_id, ["acc2|pass", "acc3|pass", "acc4|pass", "acc5|pass"] )
+        product = self.catalog.list_products(self.cat_id)[0]
+        keyboard = str(product_detail_keyboard_rows(self.product_id, int(product["available_stock"])))
+        self.assertIn("buyqty", keyboard)
+        self.assertIn("buycustom", keyboard)
+        order = self.orders.create_order(user_id=self.user_id, product_id=self.product_id, quantity=3)
+        WalletService(self.db).credit(self.user_id, "VND", 200_000, reason="test", idempotency_key="credit-visible")
+        rendered = views.order_created(order, WalletService(self.db).get_balances(self.user_id))
+        self.assertIn("Số lượng", rendered)
+        self.assertIn("Đơn giá", rendered)
+        self.assertIn("Số dư ví hiện tại", rendered)
+        self.assertIn("Còn thiếu", rendered)
+
+    def test_popular_language_menu_labels_are_available(self) -> None:
+        self.assertTrue({"vi", "en", "zh", "ja", "ko", "th", "es", "fr"}.issubset(SUPPORTED_LANGUAGES))
+        self.users.set_language(self.user_id, "en")
+        self.assertEqual(self.users.get_language(self.user_id), "en")
+        self.assertIn("🛒 Buy now", menu_rows("en")[0])
+        self.assertIn("🛒 Mua ngay", menu_texts("buy"))
+        keyboard = str(language_keyboard_rows())
+        for code in ["vi", "en", "zh", "ja", "ko", "th", "es", "fr"]:
+            self.assertIn(f"lang:{code}", keyboard)
+
+
+    def test_product_search_returns_matching_products(self) -> None:
+        results = self.catalog.search_products("chatgpt")
+        self.assertTrue(results)
+        self.assertEqual(results[0]["id"], self.product_id)
+        rendered = views.search_results("chatgpt", results)
+        self.assertIn("Kết quả tìm kiếm", rendered)
+        self.assertIn("ChatGPT Plus", rendered)
+        self.assertIn("#", rendered)
+
+    def test_search_menu_label_is_available(self) -> None:
+        self.assertIn("🔎 Tìm sản phẩm", menu_texts("search"))
+        self.assertTrue(any("Search" in item for row in menu_rows("en") for item in row))
 
     def test_sepay_normalizer_accepts_common_field_names(self) -> None:
         row = normalize_sepay_transaction({

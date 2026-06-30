@@ -42,13 +42,35 @@ class CatalogService:
             return int(c.lastrowid)
 
     def add_stock(self, product_id: int, contents: list[str]) -> int:
-        clean = list(dict.fromkeys(x.strip() for x in contents if x and x.strip()))
+        # Stock is money-sensitive: do not silently skip duplicate keys/accounts.
+        # If admin pasted a duplicate line, fail fast with a clear error so they
+        # can fix the inventory input instead of assuming every line was imported.
+        clean = [x.strip() for x in contents if x and x.strip()]
         if not clean:
             raise ValueError("stock content is required")
+        seen: set[str] = set()
+        duplicates_in_input: list[str] = []
+        for item in clean:
+            if item in seen and item not in duplicates_in_input:
+                duplicates_in_input.append(item)
+            seen.add(item)
+        if duplicates_in_input:
+            sample = ", ".join(duplicates_in_input[:3])
+            raise ValueError(f"Dòng nhập kho bị trùng trong cùng sản phẩm: {sample}. Hãy xóa/sửa dòng trùng rồi nhập lại.")
         with self.db.transaction() as conn:
+            existing = [
+                str(r["content"])
+                for r in conn.execute(
+                    "SELECT content FROM stock_items WHERE product_id=? AND content IN (%s)" % ",".join("?" for _ in clean),
+                    [product_id, *clean],
+                ).fetchall()
+            ] if clean else []
+            if existing:
+                sample = ", ".join(existing[:3])
+                raise ValueError(f"Kho đã có dòng trùng trong sản phẩm này: {sample}. Không nhập bỏ qua im lặng để tránh bán trùng key/tài khoản.")
             before = conn.total_changes
             conn.executemany(
-                "INSERT OR IGNORE INTO stock_items(product_id, content, status) VALUES(?,?, 'available')",
+                "INSERT INTO stock_items(product_id, content, status) VALUES(?,?, 'available')",
                 [(product_id, item) for item in clean],
             )
             return conn.total_changes - before
@@ -71,6 +93,30 @@ class CatalogService:
         sql += " GROUP BY p.id ORDER BY p.id DESC"
         with self.db.connect() as conn:
             return [dict(r) for r in conn.execute(sql, params)]
+
+    def search_products(self, query: str, *, limit: int = 20) -> list[dict]:
+        q = (query or "").strip()
+        if not q:
+            return []
+        like = f"%{q.lower()}%"
+        with self.db.connect() as conn:
+            return [dict(r) for r in conn.execute(
+                """
+                SELECT p.*, c.name AS category_name,
+                       COUNT(CASE WHEN s.status='available' THEN 1 END) AS available_stock
+                  FROM products p
+                  LEFT JOIN categories c ON c.id=p.category_id
+                  LEFT JOIN stock_items s ON s.product_id=p.id
+                 WHERE p.is_active=1
+                   AND (LOWER(p.name) LIKE ? OR LOWER(p.description) LIKE ? OR LOWER(COALESCE(c.name,'')) LIKE ?)
+                 GROUP BY p.id
+                 ORDER BY
+                   CASE WHEN LOWER(p.name) LIKE ? THEN 0 ELSE 1 END,
+                   p.id DESC
+                 LIMIT ?
+                """,
+                (like, like, like, like, limit),
+            )]
 
     def stock_summary(self) -> list[dict]:
         with self.db.connect() as conn:
