@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from html import escape
 import os
+import re
 
 from nimo_shop.money import fmt_money
 from nimo_shop.bot.i18n import SUPPORTED_LANGUAGES, language_display, t, normalize_lang
@@ -157,6 +158,42 @@ def _delivery_threshold() -> int:
     return max(1, min(value, 1000000))
 
 
+def _stock_labels(order: dict) -> list[str]:
+    labels_raw = str(order.get("stock_format_labels") or "").strip()
+    if labels_raw:
+        labels = [x.strip() for x in re.split(r"[|,;/\n]+", labels_raw) if x.strip()]
+        if labels:
+            return labels
+    stock_format = str(order.get("stock_format") or "auto")
+    defaults = {
+        "email_pass_pipe": ["Email", "Mật khẩu"],
+        "email_pass_slash": ["Email", "Mật khẩu"],
+        "email_pass_2fa_pipe": ["Email", "Mật khẩu", "2FA/Recovery"],
+        "uid_pass_cookie_token": ["UID", "Mật khẩu", "Cookie", "Token"],
+        "pipe": ["Cột 1", "Cột 2", "Cột 3", "Cột 4"],
+        "csv": ["Cột 1", "Cột 2", "Cột 3", "Cột 4"],
+    }
+    return defaults.get(stock_format, [])
+
+
+def _format_delivery_content(order: dict, content: str, *, html_mode: bool = False) -> str:
+    delivery_format = str(order.get("delivery_format") or "auto")
+    if delivery_format == "raw" or "|" not in content:
+        return h(content) if html_mode else content
+    labels = _stock_labels(order)
+    if not labels and delivery_format != "labeled":
+        return h(content) if html_mode else content
+    parts = [part.strip() for part in content.split("|")]
+    lines = []
+    for idx, part in enumerate(parts):
+        label = labels[idx] if idx < len(labels) else f"Cột {idx + 1}"
+        if html_mode:
+            lines.append(f"<b>{h(label)}:</b> <code>{h(part)}</code>")
+        else:
+            lines.append(f"{label}: {part}")
+    return "\n".join(lines)
+
+
 def delivery_file_text(order: dict, delivery_rows: Iterable[dict]) -> str:
     rows = list(delivery_rows)
     lines = [
@@ -168,7 +205,12 @@ def delivery_file_text(order: dict, delivery_rows: Iterable[dict]) -> str:
         "===== THONG TIN HANG =====",
     ]
     for idx, row in enumerate(rows, start=1):
-        lines.append(f"{idx}. {row['delivered_content']}")
+        item = _format_delivery_content(order, str(row['delivered_content']), html_mode=False)
+        if "\n" in item:
+            lines.append(f"{idx}.")
+            lines.extend("   " + part for part in item.splitlines())
+        else:
+            lines.append(f"{idx}. {item}")
     lines.append("")
     lines.append("Vui long luu file nay. Neu hang loi, gui ma don cho admin de duoc ho tro.")
     return "\n".join(lines)
@@ -188,7 +230,8 @@ def _delivery_inline_text(order: dict, rows: list[dict]) -> str:
         "🔐 <b>Thông tin hàng</b>",
     ]
     for idx, row in enumerate(rows, start=1):
-        lines.append(f"{idx}. <code>{h(row['delivered_content'])}</code>")
+        item = _format_delivery_content(order, str(row['delivered_content']), html_mode=True)
+        lines.append(f"{idx}. {item}")
     lines.append("\nVui lòng lưu lại thông tin. Nếu hàng lỗi, vào 💬 Hỗ trợ để liên hệ admin.")
     return "\n".join(lines)
 

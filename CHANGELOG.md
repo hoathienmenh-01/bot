@@ -62,3 +62,29 @@
 - Added Coupon management page.
 - Added Low-stock warning page and queued low-stock notifications.
 - Full test suite: 55 tests passing, compileall OK, seed demo OK, audit OK.
+
+## v2.2.0 - Smart stock file upload
+- Added product-level stock upload in Web Admin Inventory page.
+- Added `.txt`, `.csv`, and `.docx` stock file parsing without heavy dependencies.
+- Added auto-detection for `UID|password|cookie|token`, `email|password`, CSV/Excel, and raw one-line-per-item stock.
+- Added masked preview/parser logic so admin can understand detected columns without exposing full cookies/tokens in web/log previews.
+- Duplicate stock is still fail-fast: duplicate pasted/uploaded rows are rejected instead of silently skipped.
+- Added tests for pipe account import, DOCX paragraph import, and HTTP stock upload UI.
+
+## v2.3.0 - Product stock formats and manual data handling
+
+- Added product-specific stock format configuration:
+  - Auto detect
+  - Raw one item per line
+  - Email | Password
+  - Email / Password
+  - Email | Password | 2FA/Recovery
+  - UID | Password | Cookie | Token
+  - Pipe-separated custom columns
+  - CSV/Excel columns
+- Added stock labels and examples per product so admins know exactly what to paste/upload.
+- Stock import now defaults to “Theo cấu hình sản phẩm” instead of forcing one global parser.
+- Email / password inputs are normalized into Email|Password internally for consistent delivery.
+- Delivery files can render labeled fields per product, e.g. Email / Password / 2FA.
+- Added SQLite migrations for existing databases to add product stock-format columns safely.
+- Added tests for product-specific stock formats and slash-delimited account imports.

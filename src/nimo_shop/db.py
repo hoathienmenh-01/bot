@@ -55,6 +55,10 @@ CREATE TABLE IF NOT EXISTS products (
     warranty_text TEXT NOT NULL DEFAULT '',
     is_active INTEGER NOT NULL DEFAULT 1,
     cost_minor INTEGER NOT NULL DEFAULT 0,
+    stock_format TEXT NOT NULL DEFAULT 'auto',
+    stock_format_labels TEXT NOT NULL DEFAULT '',
+    stock_format_example TEXT NOT NULL DEFAULT '',
+    delivery_format TEXT NOT NULL DEFAULT 'auto',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE SET NULL
 );
@@ -217,6 +221,23 @@ class Database:
     def init(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        # Lightweight migrations for existing SQLite databases. CREATE TABLE
+        # does not add new columns to an already-created table, so add only
+        # the missing columns needed by newer web-admin versions.
+        product_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(products)")}
+        migrations = {
+            "stock_format": "ALTER TABLE products ADD COLUMN stock_format TEXT NOT NULL DEFAULT 'auto'",
+            "stock_format_labels": "ALTER TABLE products ADD COLUMN stock_format_labels TEXT NOT NULL DEFAULT ''",
+            "stock_format_example": "ALTER TABLE products ADD COLUMN stock_format_example TEXT NOT NULL DEFAULT ''",
+            "delivery_format": "ALTER TABLE products ADD COLUMN delivery_format TEXT NOT NULL DEFAULT 'auto'",
+        }
+        for col, sql in migrations.items():
+            if col not in product_cols:
+                conn.execute(sql)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

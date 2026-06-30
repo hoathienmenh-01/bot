@@ -1,6 +1,6 @@
-# TEST REPORT - v2.1.0
+# TEST REPORT
 
-Commands executed:
+Command:
 
 ```bash
 python -m compileall -q src tests
@@ -10,20 +10,46 @@ python -m compileall -q src tests
 Result:
 
 ```text
-Ran 55 tests in 3.293s
+Ran 58 tests in 3.643s
+
 OK
 Seeded demo categories/products/stock.
 AUDIT OK: no consistency issues found
 FULL TEST OK
 ```
 
-Covered areas:
+New v2.2 coverage:
 
-- Wallet/ledger idempotency and invalid amount protection.
-- Order creation, stock reservation, expiry, cancellation, refund.
-- Bank/SePay payment matching, overpay/underpay/late payment handling.
-- Delivery file policy for small/large orders.
-- Web Admin login/session/CSRF.
-- Product/category/stock/settings/wallet/payment management.
-- Multi-bot manager, notifications, backup/restore, admin guide.
-- v2.1 additions: status page, token checker, CSV import/export, webhook ingestion, reconciliation, coupons, roles, delivery logs, low-stock alerts.
+- Auto-detect pipe account files: UID/password/cookie/token.
+- Mask sensitive cookie/token values in preview/log metadata.
+- Import `.txt` stock upload into selected product.
+- Import `.docx` stock upload by reading Word paragraphs with Python stdlib.
+- Web Inventory page exposes file upload, parser mode, and guidance.
+
+## v2.3.0 Test Report
+
+Command:
+
+```bash
+python -m compileall -q src tests
+./scripts/run_full_tests.sh
+```
+
+Result:
+
+```text
+Ran 59 tests in 4.200s
+
+OK
+Seeded demo categories/products/stock.
+AUDIT OK: no consistency issues found
+FULL TEST OK
+```
+
+New coverage:
+
+- Product-specific stock parser configuration.
+- Email|Password|2FA style stock import.
+- Email / Password style stock import and normalization.
+- UID|Password|Cookie|Token detection stays masked in preview.
+- Existing web pages and old stock import flows remain compatible.

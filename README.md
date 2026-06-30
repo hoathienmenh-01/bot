@@ -439,3 +439,37 @@ Run everything:
 ```bash
 PYTHONPATH=src python -m nimo_shop.run_all --host 0.0.0.0 --port 8080
 ```
+
+
+## Nhập kho nhanh bằng file
+
+Trong Web Admin vào **Kho hàng** hoặc từ **Sản phẩm → Nhập kho**.
+
+Hỗ trợ:
+
+- `.txt`: mỗi dòng là một tài khoản/key.
+- `.csv`: dữ liệu từ Excel/Google Sheet.
+- `.docx`: file Word mới; hệ thống đọc từng dòng/đoạn văn bản.
+- Dạng phổ biến: `UID|Mật khẩu|Cookie|Token`, `Email|Mật khẩu`, hoặc một license/key mỗi dòng.
+
+Khi nhập 100, 1000 hoặc 10000 tài khoản, hãy tải file lên thay vì dán tay. Hệ thống sẽ tự nhận diện định dạng, kiểm tra trùng trong cùng sản phẩm và báo lỗi nếu trùng. Cookie/token được che trong preview/log, nhưng nội dung gốc vẫn được lưu để giao cho khách sau khi thanh toán.
+
+Lưu ý: không dùng file Word `.doc` cũ; hãy lưu thành `.docx`, `.txt` hoặc `.csv`.
+
+## v2.3: Định dạng dữ liệu kho theo từng sản phẩm
+
+Mỗi sản phẩm có thể dùng định dạng kho riêng. Vào **Sản phẩm → Sửa sản phẩm** và cấu hình:
+
+- **Định dạng dữ liệu kho**: Auto, Raw, Email|Mật khẩu, Email / Mật khẩu, Email|Mật khẩu|2FA, UID|Mật khẩu|Cookie|Token, CSV...
+- **Nhãn cột dữ liệu**: ví dụ `Email|Mật khẩu|2FA` hoặc `UID|Mật khẩu|Cookie|Token`.
+- **Ví dụ nhập kho**: ghi mẫu để sau này admin nhìn là biết file cần có dạng gì.
+- **Kiểu giao hàng**: giao nguyên dòng hoặc giao có nhãn cột.
+
+Khi nhập kho, nên để **Kiểu nhận diện = Theo cấu hình sản phẩm**. Như vậy mỗi sản phẩm được xử lý theo đúng kiểu dữ liệu của nó:
+
+- `email@example.com|password|2FA` → lưu thành một hàng giao có 3 cột.
+- `email@example.com / password` → tự chuẩn hóa thành `email@example.com|password`.
+- `UID|password|cookie|token` → giữ đủ dữ liệu, preview/log che bớt cookie/token.
+- Key/license/link mỗi dòng → giữ nguyên từng dòng.
+
+Dữ liệu giao cho khách luôn lấy từ `stock_items.content`; nếu sản phẩm bật giao có nhãn, file giao hàng sẽ hiển thị thành các dòng có nhãn như Email, Mật khẩu, 2FA, Cookie, Token.

@@ -295,3 +295,112 @@ class WebAdminV21OperationsTest(unittest.TestCase):
             self.assertIn("unmatched", wh)
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=3)
+
+class WebAdminV22StockUploadTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "shop.db"
+        self.db = Database(self.db_path)
+        self.web = AdminWebService(self.db, project_root=self.root)
+        self.web.init(bootstrap_username="owner", bootstrap_password="StrongPass123")
+        self.admin_id = int(self.web.authenticate("owner", "StrongPass123")["id"])
+        self.cat_id = self.web.create_category("Clone", admin_id=self.admin_id)
+        self.prod_id = self.web.create_product({"category_id": str(self.cat_id), "name": "Clone FB", "currency": "VND", "price": "1000", "cost": "500", "description": "", "warranty_text": ""}, admin_id=self.admin_id)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_pipe_account_file_is_detected_masked_and_imported(self) -> None:
+        raw = "\n".join([
+            "100001|pass-a|c_user=100001;xs=abc;|EAATOKEN001",
+            "100002|pass-b|c_user=100002;xs=def;|EAATOKEN002",
+            "100003|pass-c|c_user=100003;xs=ghi;|EAATOKEN003",
+        ])
+        parsed = self.web.parse_stock_text(raw, parser_mode="auto")
+        self.assertEqual(parsed["detected"], "uid_pass_cookie_token")
+        self.assertEqual(parsed["count"], 3)
+        self.assertIn("Cookie", parsed["preview"][0])
+        self.assertNotIn("EAATOKEN001", parsed["preview"][0])
+        result = self.web.add_stock_upload(self.prod_id, filename="accounts.txt", data=raw.encode("utf-8"), parser_mode="auto", admin_id=self.admin_id)
+        self.assertEqual(result["inserted"], 3)
+        with self.db.connect() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM stock_items WHERE product_id=?", (self.prod_id,)).fetchone()[0]
+        self.assertEqual(count, 3)
+
+
+    def test_product_specific_stock_formats_normalize_diverse_account_inputs(self) -> None:
+        chat_prod = self.web.create_product({
+            "category_id": str(self.cat_id),
+            "name": "ChatGPT Account",
+            "currency": "VND",
+            "price": "1000",
+            "cost": "0",
+            "description": "",
+            "warranty_text": "",
+            "stock_format": "email_pass_2fa_pipe",
+            "stock_format_labels": "Email|Mật khẩu|2FA",
+            "delivery_format": "labeled",
+        }, admin_id=self.admin_id)
+        slash_prod = self.web.create_product({
+            "category_id": str(self.cat_id),
+            "name": "Email Pass Slash",
+            "currency": "VND",
+            "price": "1000",
+            "cost": "0",
+            "description": "",
+            "warranty_text": "",
+            "stock_format": "email_pass_slash",
+            "stock_format_labels": "Email|Mật khẩu",
+            "delivery_format": "labeled",
+        }, admin_id=self.admin_id)
+        parsed_pipe = self.web.parse_stock_text("user@example.com|ChatPlus@123|YSQIL2FCYEOW6S6Q", parser_mode="email_pass_2fa_pipe")
+        self.assertEqual(parsed_pipe["lines"][0], "user@example.com|ChatPlus@123|YSQIL2FCYEOW6S6Q")
+        self.assertIn("2FA", self.web.get_product(chat_prod)["stock_format_labels"])
+
+        inserted = self.web.add_stock(slash_prod, "antoniocraig@example.site / 111111", parser_mode="product", admin_id=self.admin_id)
+        self.assertEqual(inserted, 1)
+        with self.db.connect() as conn:
+            content = conn.execute("SELECT content FROM stock_items WHERE product_id=?", (slash_prod,)).fetchone()["content"]
+        self.assertEqual(content, "antoniocraig@example.site|111111")
+
+    def test_docx_stock_upload_uses_word_paragraphs_without_extra_dependency(self) -> None:
+        import zipfile, io
+        docx = io.BytesIO()
+        xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        <w:p><w:r><w:t>email1@example.com|pass1</w:t></w:r></w:p>
+        <w:p><w:r><w:t>email2@example.com|pass2</w:t></w:r></w:p>
+        </w:body></w:document>'''
+        with zipfile.ZipFile(docx, "w") as zf:
+            zf.writestr("word/document.xml", xml)
+        result = self.web.add_stock_upload(self.prod_id, filename="stock.docx", data=docx.getvalue(), parser_mode="auto", admin_id=self.admin_id)
+        self.assertEqual(result["inserted"], 2)
+
+    def test_http_stock_page_exposes_file_upload_and_pipe_mode(self) -> None:
+        server = create_server(
+            self.db_path,
+            host="127.0.0.1",
+            port=0,
+            session_secret="test-secret",
+            project_root=self.root,
+            bootstrap_username="owner",
+            bootstrap_password="StrongPass123",
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        try:
+            data = urllib.parse.urlencode({"username": "owner", "password": "StrongPass123"}).encode("utf-8")
+            opener.open(urllib.request.Request(base + "/login", data=data, method="POST"))
+            page = opener.open(base + f"/stock?product_id={self.prod_id}").read().decode("utf-8")
+            self.assertIn('enctype="multipart/form-data"', page)
+            self.assertIn('name="stock_file"', page)
+            self.assertIn('value="pipe"', page)
+            self.assertIn("UID|Pass|Cookie|Token", page)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)

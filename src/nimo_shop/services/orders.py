@@ -79,7 +79,7 @@ class OrderService:
     def _get_order_in_conn(conn, order_id: int) -> dict:
         order = conn.execute(
             """
-            SELECT o.*, p.name AS product_name, p.warranty_text
+            SELECT o.*, p.name AS product_name, p.warranty_text, p.stock_format, p.stock_format_labels, p.delivery_format
               FROM orders o JOIN products p ON p.id=o.product_id
              WHERE o.id=?
             """,

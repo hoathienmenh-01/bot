@@ -7,6 +7,7 @@ import re
 import secrets
 import shutil
 import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,50 @@ from nimo_shop.services.notifications import NotificationService
 from nimo_shop.services.payments import PaymentService
 from nimo_shop.services.wallet import WalletService
 from nimo_shop.web.security import hash_password, verify_password
+
+
+STOCK_FORMATS: dict[str, dict[str, object]] = {
+    "auto": {
+        "name": "Tự nhận diện",
+        "labels": ["Tài khoản"],
+        "example": "Mỗi dòng một tài khoản/key. Hệ thống tự nhận email|pass, email / pass, uid|pass|cookie|token.",
+    },
+    "raw": {
+        "name": "Mỗi dòng là một hàng giao",
+        "labels": ["Dữ liệu"],
+        "example": "KEY-ABC-123 hoặc link/file/license bất kỳ. Bot giữ nguyên từng dòng.",
+    },
+    "email_pass_pipe": {
+        "name": "Email | Mật khẩu",
+        "labels": ["Email", "Mật khẩu"],
+        "example": "user@example.com|password123",
+    },
+    "email_pass_slash": {
+        "name": "Email / Mật khẩu",
+        "labels": ["Email", "Mật khẩu"],
+        "example": "user@example.com / password123",
+    },
+    "email_pass_2fa_pipe": {
+        "name": "Email | Mật khẩu | 2FA/Recovery",
+        "labels": ["Email", "Mật khẩu", "2FA/Recovery"],
+        "example": "user@example.com|password123|YSQIL2FCYEOW6S6Q...",
+    },
+    "uid_pass_cookie_token": {
+        "name": "UID | Mật khẩu | Cookie | Token",
+        "labels": ["UID", "Mật khẩu", "Cookie", "Token"],
+        "example": "6159...|pass|c_user=...;xs=...|EAAA...",
+    },
+    "pipe": {
+        "name": "Dữ liệu phân tách bằng dấu |",
+        "labels": ["Cột 1", "Cột 2", "Cột 3", "Cột 4"],
+        "example": "cot1|cot2|cot3|cot4",
+    },
+    "csv": {
+        "name": "CSV/Excel nhiều cột",
+        "labels": ["Cột 1", "Cột 2", "Cột 3", "Cột 4"],
+        "example": "email,password,2fa hoặc uid,password,cookie,token",
+    },
+}
 
 WEB_SCHEMA = r"""
 CREATE TABLE IF NOT EXISTS admin_accounts (
@@ -269,6 +314,10 @@ class AdminWebService:
             price_minor=price_minor,
             cost_minor=cost_minor,
             warranty_text=str(data.get("warranty_text") or ""),
+            stock_format=str(data.get("stock_format") or "auto"),
+            stock_format_labels=str(data.get("stock_format_labels") or ""),
+            stock_format_example=str(data.get("stock_format_example") or ""),
+            delivery_format=str(data.get("delivery_format") or "auto"),
         )
         self.log(admin_id, "product.create", "product", str(product_id), {"name": data.get("name")})
         return product_id
@@ -284,7 +333,8 @@ class AdminWebService:
             updated = conn.execute(
                 """
                 UPDATE products
-                   SET category_id=?, name=?, description=?, currency=?, price_minor=?, cost_minor=?, warranty_text=?, is_active=?
+                   SET category_id=?, name=?, description=?, currency=?, price_minor=?, cost_minor=?, warranty_text=?, is_active=?,
+                       stock_format=?, stock_format_labels=?, stock_format_example=?, delivery_format=?
                  WHERE id=?
                 """,
                 (
@@ -296,6 +346,10 @@ class AdminWebService:
                     cost_minor,
                     str(data.get("warranty_text") or "").strip(),
                     1 if str(data.get("is_active", "1")).lower() in {"1", "true", "on", "yes"} else 0,
+                    self._normalize_stock_mode(str(data.get("stock_format") or "auto")),
+                    str(data.get("stock_format_labels") or "").strip(),
+                    str(data.get("stock_format_example") or "").strip(),
+                    str(data.get("delivery_format") or "auto").strip() or "auto",
                     product_id,
                 ),
             ).rowcount
@@ -355,11 +409,221 @@ class AdminWebService:
         self.log(admin_id, f"product.{outcome}", "product", str(product_id), {"name": product["name"]})
         return outcome
 
-    def add_stock(self, product_id: int, raw_lines: str, *, admin_id: int | None = None) -> int:
-        lines = [line.strip() for line in raw_lines.splitlines() if line.strip()]
-        inserted = CatalogService(self.db).add_stock(product_id, lines)
-        self.log(admin_id, "stock.import", "product", str(product_id), {"submitted": len(lines), "inserted": inserted})
+    @staticmethod
+    def stock_format_options() -> dict[str, dict[str, object]]:
+        return STOCK_FORMATS
+
+    @staticmethod
+    def stock_format_labels(stock_format: str = "auto", custom_labels: str = "") -> list[str]:
+        if custom_labels.strip():
+            labels = [x.strip() for x in re.split(r"[|,;/\n]+", custom_labels) if x.strip()]
+            if labels:
+                return labels
+        return list(STOCK_FORMATS.get(stock_format or "auto", STOCK_FORMATS["auto"]).get("labels", ["Dữ liệu"]))
+
+    @staticmethod
+    def _normalize_stock_mode(mode: str) -> str:
+        mode = (mode or "auto").strip().lower()
+        aliases = {
+            "product": "product",
+            "email/pass": "email_pass_slash",
+            "email_pass": "email_pass_pipe",
+            "uid_pass_cookie_token": "uid_pass_cookie_token",
+            "uid|pass|cookie|token": "uid_pass_cookie_token",
+        }
+        return aliases.get(mode, mode if mode in STOCK_FORMATS else "auto")
+
+    def product_stock_format(self, product_id: int, fallback: str = "auto") -> dict[str, object]:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT stock_format, stock_format_labels, stock_format_example, delivery_format FROM products WHERE id=?", (product_id,)).fetchone()
+        if not row:
+            return {"stock_format": fallback, "stock_format_labels": "", "stock_format_example": "", "delivery_format": "auto"}
+        return dict(row)
+
+    def parse_stock_text(self, raw_text: str, *, parser_mode: str = "auto", custom_labels: str = "") -> dict[str, object]:
+        """Parse stock data pasted or uploaded by admin.
+
+        This parser is intentionally product-aware but conservative. It normalizes
+        common credential formats into one stock line per delivered item. The
+        original secret values are preserved inside the normalized line; previews
+        and logs are masked.
+
+        Supported examples:
+        - email@example.com|password|2FA
+        - email@example.com / password
+        - UID|password|cookie|token
+        - raw key/license/link, one item per line
+        """
+        text = (raw_text or "").replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        if not lines:
+            raise ValueError("Không tìm thấy dòng dữ liệu kho trong file/nội dung nhập")
+
+        mode = self._normalize_stock_mode(parser_mode)
+        detected = "raw"
+        normalized: list[str] = []
+
+        def looks_email(value: str) -> bool:
+            return "@" in value and "." in value.split("@")[-1]
+
+        def slash_to_pipe(line: str) -> str | None:
+            # Prefer explicit spaced slash. Also tolerate tab-like spaces around slash.
+            parts = [x.strip() for x in re.split(r"\s+/\s+", line, maxsplit=1) if x.strip()]
+            if len(parts) == 2 and (looks_email(parts[0]) or len(parts[0]) >= 3):
+                return "|".join(parts)
+            return None
+
+        if mode == "raw":
+            detected = "raw"
+            normalized = lines
+        elif mode == "email_pass_slash":
+            detected = "email_pass_slash"
+            normalized = []
+            for line in lines:
+                value = slash_to_pipe(line)
+                if not value:
+                    raise ValueError(f"Dòng không đúng dạng Email / Mật khẩu: {self.mask_stock_line(line, 'raw')}")
+                normalized.append(value)
+        elif mode in {"email_pass_pipe", "email_pass_2fa_pipe", "uid_pass_cookie_token", "pipe"}:
+            expected_min = {"email_pass_pipe": 2, "email_pass_2fa_pipe": 3, "uid_pass_cookie_token": 4, "pipe": 2}[mode]
+            detected = mode
+            normalized = []
+            for line in lines:
+                parts = [x.strip() for x in line.split("|")]
+                if len(parts) < expected_min or any(not x for x in parts[:expected_min]):
+                    raise ValueError(f"Dòng không đúng định dạng {STOCK_FORMATS[mode]['name']}: {self.mask_stock_line(line, 'raw')}")
+                normalized.append("|".join(parts))
+        elif mode == "csv":
+            reader = csv.reader(io.StringIO(text))
+            rows = [[cell.strip() for cell in row] for row in reader if any(cell.strip() for cell in row)]
+            if not rows:
+                raise ValueError("CSV không có dòng dữ liệu")
+            header_tokens = {"username", "user", "email", "password", "pass", "cookie", "token", "uid", "account", "2fa", "recovery"}
+            start = 1 if any(c.lower() in header_tokens for c in rows[0]) else 0
+            detected = "csv"
+            normalized = ["|".join(row) for row in rows[start:] if any(row)]
+        else:
+            # Auto detection: keep line-based semantics; choose the safest
+            # normalizer based on the majority format in the file.
+            slash_rows = [slash_to_pipe(line) for line in lines]
+            valid_slash = [x for x in slash_rows if x]
+            pipe_rows = [line for line in lines if line.count("|") >= 1]
+            pipe4_rows = [line for line in lines if line.count("|") >= 3]
+            sample = "\n".join(lines[:5])
+            if pipe4_rows and len(pipe4_rows) >= max(1, int(len(lines) * 0.7)):
+                detected = "uid_pass_cookie_token"
+                normalized = pipe4_rows
+            elif pipe_rows and len(pipe_rows) >= max(1, int(len(lines) * 0.7)):
+                # Email|pass|2fa and email|pass both stay pipe lines; labels can
+                # be controlled by product stock_format.
+                detected = "pipe_account"
+                normalized = pipe_rows
+            elif valid_slash and len(valid_slash) >= max(1, int(len(lines) * 0.7)):
+                detected = "email_pass_slash"
+                normalized = valid_slash
+            elif "," in sample and any(h in sample.lower() for h in ["username", "password", "account", "email", "token", "cookie"]):
+                reader = csv.reader(io.StringIO(text))
+                rows = [[cell.strip() for cell in row] for row in reader if any(cell.strip() for cell in row)]
+                header_tokens = {"username", "user", "email", "password", "pass", "cookie", "token", "uid", "account", "2fa", "recovery"}
+                start = 1 if rows and any(c.lower() in header_tokens for c in rows[0]) else 0
+                detected = "csv"
+                normalized = ["|".join(row) for row in rows[start:] if any(row)]
+            else:
+                detected = "raw"
+                normalized = lines
+
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for line in normalized:
+            if line in seen and line not in duplicates:
+                duplicates.append(line)
+            seen.add(line)
+        preview = [self.mask_stock_line(line, detected, custom_labels=custom_labels) for line in normalized[:5]]
+        return {
+            "detected": detected,
+            "lines": normalized,
+            "count": len(normalized),
+            "duplicates": duplicates,
+            "preview": preview,
+        }
+
+    def mask_stock_line(self, line: str, detected: str = "raw", *, custom_labels: str = "") -> str:
+        def mask(value: str, keep: int = 4) -> str:
+            value = value.strip()
+            if len(value) <= keep * 2:
+                return value[:2] + "***" if value else ""
+            return value[:keep] + "…" + value[-keep:]
+
+        if "|" not in line:
+            return mask(line, 6)
+        parts = line.split("|")
+        labels = self.stock_format_labels(detected, custom_labels)
+        if detected == "pipe_account":
+            labels = ["Tài khoản", "Mật khẩu", "Cột 3", "Cột 4"]
+        masked: list[str] = []
+        for idx, part in enumerate(parts):
+            label = labels[idx] if idx < len(labels) else f"Cột {idx + 1}"
+            masked.append(f"{label}: {mask(part, 4)}")
+        return " | ".join(masked)
+
+    def extract_stock_text_from_upload(self, filename: str, data: bytes) -> str:
+        name = (filename or "").lower()
+        if not data:
+            raise ValueError("File tải lên đang trống")
+        if name.endswith(".docx"):
+            # Minimal DOCX text extraction with stdlib: read document XML and
+            # join text nodes by paragraph/table order. This lets admins upload
+            # Word files without installing heavy dependencies on Termux.
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    xml = zf.read("word/document.xml")
+            except Exception as exc:
+                raise ValueError("Không đọc được file .docx. Hãy lưu lại đúng định dạng Word .docx hoặc dùng .txt/.csv") from exc
+            root = ET.fromstring(xml)
+            ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+            paragraphs: list[str] = []
+            for para in root.findall(".//w:p", ns):
+                txt = "".join(t.text or "" for t in para.findall(".//w:t", ns)).strip()
+                if txt:
+                    paragraphs.append(txt)
+            return "\n".join(paragraphs)
+        for enc in ("utf-8-sig", "utf-8", "cp1258", "latin-1"):
+            try:
+                return data.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return data.decode("utf-8", errors="replace")
+
+    def _resolve_stock_parser(self, product_id: int, parser_mode: str = "auto") -> tuple[str, str]:
+        mode = self._normalize_stock_mode(parser_mode)
+        labels = ""
+        if mode == "product":
+            profile = self.product_stock_format(product_id)
+            mode = self._normalize_stock_mode(str(profile.get("stock_format") or "auto"))
+            labels = str(profile.get("stock_format_labels") or "")
+        return mode, labels
+
+    def add_stock(self, product_id: int, raw_lines: str, *, admin_id: int | None = None, parser_mode: str = "product") -> int:
+        parser_mode, custom_labels = self._resolve_stock_parser(product_id, parser_mode)
+        parsed = self.parse_stock_text(raw_lines, parser_mode=parser_mode, custom_labels=custom_labels)
+        lines = parsed["lines"]
+        duplicates = parsed.get("duplicates") or []
+        if duplicates:
+            sample = ", ".join(self.mask_stock_line(str(x), str(parsed.get("detected") or "raw"), custom_labels=custom_labels) for x in list(duplicates)[:3])
+            raise ValueError(f"Dữ liệu nhập có dòng trùng. Hãy xóa/sửa dòng trùng rồi nhập lại. Ví dụ: {sample}")
+        inserted = CatalogService(self.db).add_stock(product_id, list(lines))
+        self.log(admin_id, "stock.import", "product", str(product_id), {"submitted": int(parsed["count"]), "inserted": inserted, "detected": parsed.get("detected"), "parser_mode": parser_mode})
         return inserted
+
+    def add_stock_upload(self, product_id: int, *, filename: str, data: bytes, raw_text: str = "", parser_mode: str = "product", admin_id: int | None = None) -> dict[str, object]:
+        text = raw_text or self.extract_stock_text_from_upload(filename, data)
+        parser_mode, custom_labels = self._resolve_stock_parser(product_id, parser_mode)
+        parsed = self.parse_stock_text(text, parser_mode=parser_mode, custom_labels=custom_labels)
+        inserted = self.add_stock(product_id, "\n".join(parsed["lines"]), parser_mode="raw", admin_id=admin_id)
+        parsed["inserted"] = inserted
+        parsed["filename"] = filename
+        parsed["parser_mode"] = parser_mode
+        return parsed
 
     def list_stock_items(self, product_id: int | None = None, status: str | None = None, limit: int = 200) -> list[dict]:
         sql = """
