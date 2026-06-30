@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## v1.5.0-premium-admin-ui
+
+- Làm lại Web Admin theo hướng premium, dễ nhìn hơn, nút bấm rõ ràng hơn và responsive tốt hơn.
+- Làm lại trang Cấu hình theo nhóm: Shop/Admin Telegram, Bot Telegram, Ngân hàng & SePay, Binance Pay, Web Admin.
+- Thêm hướng dẫn tiếng Việt chi tiết cho từng ô cấu hình: nhập gì, lấy ở đâu, dùng để làm gì.
+- Secret như BOT_TOKEN/SEPAY/BINANCE không còn hiện ngược ra form; để trống nghĩa là giữ giá trị cũ.
+- Đổi WEB_ADMIN_USERNAME/WEB_ADMIN_PASSWORD trong web có hiệu lực ngay trong database admin, không cần sửa tay.
+- Làm lại trang Sản phẩm: chỉ hiện danh sách sản phẩm và nút Thêm/Sửa/Xóa rõ ràng; form thêm/sửa tách riêng.
+- Thêm xóa sản phẩm an toàn: sản phẩm chưa có lịch sử sẽ xóa thật; sản phẩm đã có đơn/bán hàng sẽ ẩn để giữ audit/doanh thu.
+- Chặn xóa sản phẩm đang có đơn chờ hoặc stock đang được giữ để tránh mất hàng/lệch đơn.
+- Việt hóa các nhãn gây rối trong web admin như Payment intents, Provider events, Cash ledger.
+- Bổ sung test cho sửa/xóa sản phẩm, UI sản phẩm, form cấu hình, bảo toàn secret khi cập nhật settings, đổi mật khẩu web.
+- Full test: 45/45 passed; compileall, seed demo và audit đều OK.
+
 ## v1.4.0-web-admin
 
 - Thêm Web Admin nhẹ, chạy bằng Python stdlib `http.server`, không cần Node/React/FastAPI.

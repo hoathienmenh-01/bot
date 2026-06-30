@@ -4,12 +4,22 @@ Bot bán hàng Telegram cho sản phẩm số: tài khoản, key, license, gói 
 
 ## Trạng thái bản này
 
-- Phiên bản: `1.4.0-web-admin`
+- Phiên bản: `1.5.0-premium-admin-ui`
 - Core ví/đơn/kho/payment: hoàn thiện ở mức MVP dùng thật cẩn thận.
 - Telegram UI: flow khách hàng và admin cơ bản bằng aiogram 3.
 - Web Admin: quản lý dashboard, đơn hàng, sản phẩm, danh mục, kho, user, ví, dòng tiền, payment, cấu hình, audit, log admin.
 - Giao diện web: responsive, light/dark mode, tiếng Việt/English.
-- Test: `43/43 passed`.
+- Test: `45/45 passed`.
+
+
+### Cập nhật v1.5.0 Web Admin Premium
+
+- Trang **Cấu hình** đã được chia thành từng nhóm rõ ràng: Shop/Admin Telegram, Bot Telegram, Ngân hàng & SePay, Binance Pay, Web Admin.
+- Mỗi ô cấu hình có nhãn tiếng Việt, mô tả nhập gì, lấy ở đâu và dùng để làm gì.
+- Secret như Bot Token/API key không hiển thị lại trên form; để trống nghĩa là giữ giá trị cũ.
+- Trang **Sản phẩm** chỉ hiển thị danh sách và nút **Thêm / Sửa / Xóa** rõ ràng. Form thêm/sửa nằm ở trang riêng.
+- Xóa sản phẩm an toàn: chưa có lịch sử thì xóa thật; đã có đơn/bán hàng thì tự ẩn để giữ báo cáo và audit.
+- Đổi mật khẩu Web Admin trong trang cấu hình có hiệu lực ngay, không cần chỉnh database/câu lệnh thủ công.
 
 ## Chức năng khách hàng Telegram
 

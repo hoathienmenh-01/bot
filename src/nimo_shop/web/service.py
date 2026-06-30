@@ -175,6 +175,26 @@ class AdminWebService:
                 """
             )]
 
+    def get_product(self, product_id: int) -> dict:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT p.*, c.name AS category_name,
+                       COALESCE(SUM(CASE WHEN s.status='available' THEN 1 ELSE 0 END),0) AS available_stock,
+                       COALESCE(SUM(CASE WHEN s.status='reserved' THEN 1 ELSE 0 END),0) AS reserved_stock,
+                       COALESCE(SUM(CASE WHEN s.status='sold' THEN 1 ELSE 0 END),0) AS sold_stock
+                  FROM products p
+                  LEFT JOIN categories c ON c.id=p.category_id
+                  LEFT JOIN stock_items s ON s.product_id=p.id
+                 WHERE p.id=?
+                 GROUP BY p.id
+                """,
+                (product_id,),
+            ).fetchone()
+        if not row:
+            raise ValueError("Không tìm thấy sản phẩm")
+        return dict(row)
+
     def create_product(self, data: dict[str, Any], *, admin_id: int | None = None) -> int:
         price_minor = to_minor(data["price"], data.get("currency", "VND"))
         cost_minor = to_minor(data.get("cost", "0"), data.get("currency", "VND"))
@@ -219,6 +239,48 @@ class AdminWebService:
             if updated == 0:
                 raise ValueError("product not found")
         self.log(admin_id, "product.update", "product", str(product_id), {"name": data.get("name")})
+
+    def delete_product(self, product_id: int, *, admin_id: int | None = None) -> str:
+        """Safely delete a product.
+
+        If the product has no order history, it is removed together with its
+        unsold stock. If it already has sales/history, the product is hidden
+        instead of being physically deleted so old orders and reports stay
+        auditable. Products with active reservations/pending orders are rejected
+        to avoid losing stock or breaking an in-progress checkout.
+        """
+        with self.db.transaction() as conn:
+            product = conn.execute("SELECT id, name FROM products WHERE id=?", (product_id,)).fetchone()
+            if not product:
+                raise ValueError("Không tìm thấy sản phẩm")
+            active_refs = conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM orders WHERE product_id=? AND status IN ('awaiting_payment','paid')) +
+                    (SELECT COUNT(*) FROM stock_items WHERE product_id=? AND status='reserved')
+                """,
+                (product_id, product_id),
+            ).fetchone()[0]
+            if int(active_refs or 0) > 0:
+                raise ValueError("Không thể xóa sản phẩm đang có đơn chờ thanh toán hoặc hàng đang được giữ")
+
+            history_refs = conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM orders WHERE product_id=?) +
+                    (SELECT COUNT(*) FROM stock_items WHERE product_id=? AND status='sold')
+                """,
+                (product_id, product_id),
+            ).fetchone()[0]
+            if int(history_refs or 0) > 0:
+                conn.execute("UPDATE products SET is_active=0 WHERE id=?", (product_id,))
+                outcome = "deactivated"
+            else:
+                conn.execute("DELETE FROM stock_items WHERE product_id=?", (product_id,))
+                conn.execute("DELETE FROM products WHERE id=?", (product_id,))
+                outcome = "deleted"
+        self.log(admin_id, f"product.{outcome}", "product", str(product_id), {"name": product["name"]})
+        return outcome
 
     def add_stock(self, product_id: int, raw_lines: str, *, admin_id: int | None = None) -> int:
         lines = [line.strip() for line in raw_lines.splitlines() if line.strip()]
@@ -340,13 +402,20 @@ class AdminWebService:
         return {r["key"]: {"value": r["value"], "is_secret": bool(r["is_secret"]), "updated_at": r["updated_at"]} for r in rows}
 
     def update_settings(self, values: dict[str, str], *, admin_id: int | None = None, write_env: bool = False) -> None:
+        # Blank secret fields mean "keep the previously saved value". This is
+        # important for the premium settings UI, where secrets are not rendered
+        # back into the form for safety.
+        changed_keys: list[str] = []
         with self.db.transaction() as conn:
+            current = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM app_settings")}
             for key, value in values.items():
                 if key not in DEFAULT_SETTING_KEYS:
                     continue
+                is_secret = DEFAULT_SETTING_KEYS[key][1]
                 if key.endswith("ENABLED"):
                     value = _env_bool(value)
-                is_secret = DEFAULT_SETTING_KEYS[key][1]
+                if is_secret and str(value).strip() == "" and current.get(key):
+                    continue
                 conn.execute(
                     """
                     INSERT INTO app_settings(key, value, is_secret, updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP)
@@ -354,9 +423,21 @@ class AdminWebService:
                     """,
                     (key, str(value), is_secret),
                 )
+                changed_keys.append(key)
+
+            # Apply web login changes immediately; otherwise users save the new
+            # password in Settings but still cannot log in with it until manual DB
+            # changes. Empty password means keep the current password.
+            if admin_id:
+                username = str(values.get("WEB_ADMIN_USERNAME") or "").strip()
+                password = str(values.get("WEB_ADMIN_PASSWORD") or "").strip()
+                if username:
+                    conn.execute("UPDATE admin_accounts SET username=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (username, admin_id))
+                if password:
+                    conn.execute("UPDATE admin_accounts SET password_hash=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (hash_password(password), admin_id))
         if write_env:
             self.write_env_file()
-        self.log(admin_id, "settings.update", "settings", "", {"keys": sorted(k for k in values if k in DEFAULT_SETTING_KEYS), "write_env": write_env})
+        self.log(admin_id, "settings.update", "settings", "", {"keys": sorted(changed_keys), "write_env": write_env})
 
     def write_env_file(self, path: str | Path | None = None) -> Path:
         target = Path(path) if path else self.project_root / ".env"

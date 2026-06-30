@@ -1,4 +1,4 @@
-# TEST REPORT - NIMO Shop v1.4.0 Web Admin
+# TEST REPORT - NIMO Shop v1.5.0 Premium Admin UI
 
 Ngày kiểm thử: 2026-06-30
 
@@ -20,37 +20,33 @@ DATABASE_PATH=$(mktemp -d)/shop.db PYTHONPATH=src python -m nimo_shop.audit
 ## Kết quả
 
 ```text
-Ran 43 tests in 1.564s
+Ran 45 tests in 1.694s
 OK
 Seeded demo categories/products/stock.
 AUDIT OK: no consistency issues found
 FULL TEST OK
 ```
 
-## Nhóm test mới trong v1.4
+## Phạm vi test đáng chú ý
 
-- `test_password_hash_session_and_csrf_are_enforced`
-- `test_service_manages_products_stock_settings_wallet_and_payment`
-- `test_http_admin_login_csrf_forms_and_pages`
+- Core ví/đơn/kho/payment vẫn pass toàn bộ test cũ.
+- Chống double-credit provider transaction.
+- Chống bán trùng stock.
+- Xử lý thiếu tiền/dư tiền/chuyển tiền muộn.
+- Refund idempotent.
+- Order ownership guard.
+- Binance Pay helper và SePay/VietQR helper.
+- First-run setup không crash khi BOT_TOKEN trống/mẫu/sai format.
+- Web Admin login/session/CSRF.
+- Dashboard/categories/products/stock/settings HTTP flow.
+- Trang sản phẩm mới: danh sách + nút Thêm/Sửa/Xóa rõ ràng.
+- Service sửa sản phẩm.
+- Service xóa sản phẩm an toàn: hard delete khi chưa có lịch sử, soft hide khi đã có lịch sử.
+- Trang cấu hình mới có hướng dẫn tiếng Việt theo nhóm.
+- Secret settings để trống thì giữ giá trị cũ.
+- Đổi username/password web admin qua settings có hiệu lực ngay.
+- Audit sạch sau luồng web.
 
-## Phạm vi đã test
+## Kết luận
 
-- Web Admin login bằng password hash PBKDF2.
-- Session signed cookie.
-- CSRF token cho form POST.
-- Dashboard chạy sau login.
-- Tạo danh mục qua web.
-- Tạo sản phẩm qua web.
-- Nhập kho qua web.
-- Cộng ví thủ công qua web service.
-- Xác nhận thanh toán thủ công qua web service và giao đơn.
-- Cập nhật settings, ghi `.env`.
-- Light/Dark + VI/EN toggle ở HTTP layer.
-- Audit không báo lỗi sau luồng web.
-- Toàn bộ 40 test lõi cũ vẫn pass.
-
-
-## v1.4.1 additional verification
-
-- Added tests for first-run setup token validation.
-- Verified full test suite after setup fallback changes.
+Bản v1.5.0 đã sửa trọng tâm Web Admin UI/UX, settings và quản lý sản phẩm. Không phát hiện lỗi consistency trong audit sau test.

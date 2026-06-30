@@ -58,6 +58,30 @@ class WebAdminTest(unittest.TestCase):
         self.assertEqual(inserted, 2)
         self.assertEqual(self.web.counts()["available_stock"], 2)
 
+        self.web.update_product(
+            prod_id,
+            {
+                "category_id": str(cat_id),
+                "name": "ChatGPT Plus Premium",
+                "currency": "VND",
+                "price": "160000",
+                "cost": "100000",
+                "description": "30 ngày, đã sửa",
+                "warranty_text": "1 đổi 1",
+                "is_active": "1",
+            },
+            admin_id=admin_id,
+        )
+        self.assertEqual(self.web.get_product(prod_id)["name"], "ChatGPT Plus Premium")
+
+        temp_prod = self.web.create_product(
+            {"category_id": str(cat_id), "name": "Temp Product", "currency": "VND", "price": "1000", "cost": "0", "description": "", "warranty_text": ""},
+            admin_id=admin_id,
+        )
+        self.assertEqual(self.web.delete_product(temp_prod, admin_id=admin_id), "deleted")
+        with self.assertRaises(ValueError):
+            self.web.get_product(temp_prod)
+
         user_id = UserService(self.db).get_or_create(111, "buyer", "Buyer")
         self.web.manual_wallet_adjust(user_id=user_id, direction="credit", currency="VND", amount="100000", reason="test_credit", admin_id=admin_id)
         wallets = self.web.list_wallets()
@@ -65,14 +89,21 @@ class WebAdminTest(unittest.TestCase):
 
         order = OrderService(self.db).create_order(user_id=user_id, product_id=prod_id)
         intent = PaymentService(self.db).create_order_payment_intent(order_id=order["id"], provider="bank")
-        result = self.web.confirm_payment(payment_code=intent["public_code"], tx_id="WEBTX001", amount="150000", currency="VND", provider="bank", admin_id=admin_id)
+        result = self.web.confirm_payment(payment_code=intent["public_code"], tx_id="WEBTX001", amount="160000", currency="VND", provider="bank", admin_id=admin_id)
         self.assertEqual(result["status"], "order_delivered")
         self.assertEqual(OrderService(self.db).get_order(order["id"])["status"], "delivered")
 
-        self.web.update_settings({"SHOP_NAME": "NIMO TEST", "BANK_ENABLED": "on", "WEB_PORT": "9090"}, admin_id=admin_id, write_env=True)
+        self.web.update_settings({"SHOP_NAME": "NIMO TEST", "BANK_ENABLED": "on", "WEB_PORT": "9090", "WEB_ADMIN_USERNAME": "owner2", "WEB_ADMIN_PASSWORD": "NewStrongPass123", "BOT_TOKEN": "123456789:AASecretTokenValueForTest"}, admin_id=admin_id, write_env=True)
         env_text = (self.root / ".env").read_text(encoding="utf-8")
         self.assertIn("SHOP_NAME=NIMO TEST", env_text)
         self.assertIn("BANK_ENABLED=true", env_text)
+        self.assertIn("BOT_TOKEN=123456789:AASecretTokenValueForTest", env_text)
+        self.assertIsNotNone(self.web.authenticate("owner2", "NewStrongPass123"))
+
+        self.web.update_settings({"BOT_TOKEN": "", "WEB_ADMIN_USERNAME": "owner2", "WEB_ADMIN_PASSWORD": ""}, admin_id=admin_id, write_env=True)
+        env_text_after_blank_secret = (self.root / ".env").read_text(encoding="utf-8")
+        self.assertIn("BOT_TOKEN=123456789:AASecretTokenValueForTest", env_text_after_blank_secret)
+        self.assertIsNotNone(self.web.authenticate("owner2", "NewStrongPass123"))
         self.assertEqual(self.web.audit(), [])
         self.assertGreaterEqual(len(self.web.audit_logs()), 5)
 
@@ -110,8 +141,19 @@ class WebAdminTest(unittest.TestCase):
             token = re.search(r'name="csrf" value="([a-f0-9]+)"', cats).group(1)
             post("/products/create", {"csrf": token, "category_id": "1", "name": "Gemini Pro", "currency": "VND", "price": "99000", "cost": "50000", "description": "1 tháng", "warranty_text": "7 ngày"})
             products = opener.open(base + "/products").read().decode("utf-8")
+            self.assertIn("Danh sách sản phẩm", products)
+            self.assertIn("Thêm sản phẩm", products)
             self.assertIn("Gemini Pro", products)
+            self.assertIn(">Sửa<", products)
+            self.assertIn(">Xóa<", products)
             token = re.search(r'name="csrf" value="([a-f0-9]+)"', products).group(1)
+            edit_page = opener.open(base + "/products?edit=1").read().decode("utf-8")
+            self.assertIn("Sửa sản phẩm", edit_page)
+            settings_page = opener.open(base + "/settings").read().decode("utf-8")
+            self.assertIn("Hướng dẫn cấu hình", settings_page)
+            self.assertIn("Bot Token", settings_page)
+            self.assertIn("Mã ngân hàng", settings_page)
+            self.assertNotIn("Payment intents", settings_page)
             post("/stock/import", {"csrf": token, "product_id": "1", "contents": "key-a\nkey-b"})
             stock = opener.open(base + "/stock").read().decode("utf-8")
             self.assertIn("key-a", stock)
