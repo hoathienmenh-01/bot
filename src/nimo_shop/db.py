@@ -214,6 +214,26 @@ CREATE TABLE IF NOT EXISTS bot_notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_bot_notifications_status ON bot_notifications(status, id);
 
+CREATE TABLE IF NOT EXISTS bank_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    bank_name TEXT NOT NULL DEFAULT '',
+    bank_bin TEXT NOT NULL,
+    account_no TEXT NOT NULL,
+    account_name TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'sepay' CHECK(provider IN ('sepay','pay2s','casso','custom','manual')),
+    api_key TEXT NOT NULL DEFAULT '',
+    api_secret TEXT NOT NULL DEFAULT '',
+    base_url TEXT NOT NULL DEFAULT '',
+    poll_seconds INTEGER NOT NULL DEFAULT 30,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_bank_accounts_enabled ON bank_accounts(is_enabled, is_default, id);
+
 CREATE TABLE IF NOT EXISTS managed_bots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -332,6 +352,41 @@ class Database:
             conn.execute("DROP TABLE stock_items")
             conn.execute("ALTER TABLE stock_items_v26 RENAME TO stock_items")
             conn.execute("PRAGMA foreign_keys=ON")
+
+
+
+        bank_sql_row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='bank_accounts'").fetchone()
+        bank_sql = str(bank_sql_row[0] if bank_sql_row else "")
+        if "CHECK(provider IN ('sepay','casso','custom','manual'))" in bank_sql and "pay2s" not in bank_sql:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS bank_accounts_v2811 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT NOT NULL,
+                    bank_name TEXT NOT NULL DEFAULT '',
+                    bank_bin TEXT NOT NULL,
+                    account_no TEXT NOT NULL,
+                    account_name TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT 'sepay' CHECK(provider IN ('sepay','pay2s','casso','custom','manual')),
+                    api_key TEXT NOT NULL DEFAULT '',
+                    api_secret TEXT NOT NULL DEFAULT '',
+                    base_url TEXT NOT NULL DEFAULT '',
+                    poll_seconds INTEGER NOT NULL DEFAULT 30,
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    is_enabled INTEGER NOT NULL DEFAULT 1,
+                    notes TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                INSERT INTO bank_accounts_v2811(id, label, bank_name, bank_bin, account_no, account_name, provider, api_key, api_secret, base_url, poll_seconds, is_default, is_enabled, notes, created_at, updated_at)
+                SELECT id, label, bank_name, bank_bin, account_no, account_name, provider, api_key, api_secret, base_url, poll_seconds, is_default, is_enabled, notes, created_at, updated_at FROM bank_accounts
+            """)
+            conn.execute("DROP TABLE bank_accounts")
+            conn.execute("ALTER TABLE bank_accounts_v2811 RENAME TO bank_accounts")
+            conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bank_accounts_enabled ON bank_accounts(is_enabled, is_default, id)")
 
         order_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(orders)")}
         if "preorder_id" not in order_cols:

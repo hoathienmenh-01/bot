@@ -8,9 +8,11 @@ from pathlib import Path
 from nimo_shop.bot.app import build_dispatcher
 from nimo_shop.config import Settings
 from nimo_shop.db import Database
+from nimo_shop.payments.pay2s import Pay2SClient, Pay2SConfig
 from nimo_shop.payments.sepay import SepayClient
+from nimo_shop.services.bank_accounts import BankAccountService
 from nimo_shop.services.payments import PaymentService
-from nimo_shop.services.provider_sync import apply_sepay_transactions
+from nimo_shop.services.provider_sync import apply_pay2s_transactions, apply_sepay_transactions
 from nimo_shop.services.notifications import NotificationService
 
 _TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{20,}$")
@@ -92,16 +94,55 @@ async def sepay_poll_loop(settings: Settings, payments: PaymentService, db: Data
         poll_seconds = 10
         try:
             bank_enabled = _runtime_bool(db, "BANK_ENABLED", settings.bank_enabled)
-            api_key = _runtime_setting(db, "SEPAY_API_KEY", settings.sepay_api_key)
-            poll_seconds = max(5, int(_runtime_setting(db, "SEPAY_POLL_SECONDS", settings.sepay_poll_seconds) or settings.sepay_poll_seconds))
-            if not (bank_enabled and api_key):
+            legacy_poll_seconds = max(5, int(_runtime_setting(db, "SEPAY_POLL_SECONDS", settings.sepay_poll_seconds) or settings.sepay_poll_seconds))
+            poll_seconds = legacy_poll_seconds
+            if not bank_enabled:
                 await asyncio.sleep(min(poll_seconds, 10))
                 continue
-            client = SepayClient(api_key)
-            transactions = await asyncio.to_thread(client.list_transactions, limit=50)
-            summary = apply_sepay_transactions(payments, transactions)
-            if summary.get("applied") or summary.get("unmatched") or summary.get("invalid"):
-                print(f"[sepay] {summary}")
+
+            account_service = BankAccountService(db)
+            accounts = [
+                a for a in account_service.enabled_accounts()
+                if str(a.get("provider") or "").lower() in {"sepay", "pay2s"} and str(a.get("api_key") or "").strip()
+            ]
+
+            # Backward compatibility: if the owner has not created multi-bank
+            # accounts yet, keep using the old single SEPAY_API_KEY setting.
+            if not accounts:
+                api_key = _runtime_setting(db, "SEPAY_API_KEY", settings.sepay_api_key)
+                if not api_key:
+                    await asyncio.sleep(min(poll_seconds, 10))
+                    continue
+                accounts = [{"id": "legacy", "label": "Legacy SePay", "provider": "sepay", "api_key": api_key, "base_url": "", "poll_seconds": legacy_poll_seconds}]
+
+            combined = {"processed": 0, "duplicates": 0, "unmatched": 0, "invalid": 0, "applied": 0}
+            for account in accounts:
+                account_poll = max(5, int(account.get("poll_seconds") or legacy_poll_seconds))
+                poll_seconds = min(poll_seconds, account_poll)
+                provider = str(account.get("provider") or "sepay").lower()
+                tagged_transactions = []
+                if provider == "pay2s":
+                    client = Pay2SClient(Pay2SConfig(
+                        token=str(account.get("api_key") or ""),
+                        account_no=str(account.get("account_no") or ""),
+                        base_url=str(account.get("base_url") or "https://api.pay2s.vn/userapi"),
+                    ))
+                    transactions = await asyncio.to_thread(client.list_transactions, days=2)
+                    apply_fn = apply_pay2s_transactions
+                else:
+                    client = SepayClient(str(account.get("api_key") or ""), base_url=str(account.get("base_url") or "https://my.sepay.vn/userapi"))
+                    transactions = await asyncio.to_thread(client.list_transactions, limit=50)
+                    apply_fn = apply_sepay_transactions
+                for tx in transactions:
+                    item = dict(tx)
+                    item["_bank_account_id"] = str(account.get("id") or "legacy")
+                    item["_bank_account_label"] = str(account.get("label") or "")
+                    tagged_transactions.append(item)
+                summary = apply_fn(payments, tagged_transactions)
+                for key in combined:
+                    combined[key] += int(summary.get(key) or 0)
+            if combined.get("applied") or combined.get("unmatched") or combined.get("invalid"):
+                print(f"[bank-sync] {combined}")
         except Exception as exc:  # pragma: no cover - runtime logging only
             print(f"[sepay] polling error: {exc}")
         await asyncio.sleep(poll_seconds)

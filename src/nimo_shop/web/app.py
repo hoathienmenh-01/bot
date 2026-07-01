@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from nimo_shop.db import Database
 from nimo_shop.money import fmt_money, from_minor
 from nimo_shop.payments.binance_pay import BinancePayClient, BinancePayConfig
+from nimo_shop.services.bank_accounts import BankAccountService
 from nimo_shop.services.catalog import CatalogService
 from nimo_shop.services.orders import OrderService, OutOfStock, iso, utcnow
 from nimo_shop.services.users import UserService
@@ -27,7 +28,7 @@ LANG = {
     "vi": {
         "dashboard": "Tổng quan", "orders": "Đơn hàng", "products": "Sản phẩm", "categories": "Danh mục",
         "stock": "Kho hàng", "users": "Người dùng", "wallets": "Ví", "finance": "Dòng tiền",
-        "payments": "Thanh toán", "settings": "Cấu hình", "audit": "Kiểm tra hệ thống", "logs": "Nhật ký admin", "bots": "Quản lý bot", "notifications": "Thông báo bot", "backup": "Backup dữ liệu", "guide": "Hướng dẫn", "status": "Trạng thái", "imports": "Nhập/Xuất", "exports": "Báo cáo", "reconcile": "Đối soát", "coupons": "Mã giảm giá", "roles": "Phân quyền", "deliveries": "Lịch sử giao hàng", "low_stock": "Cảnh báo kho", "preorders": "Đặt trước",
+        "payments": "Thanh toán", "bank_accounts": "Tài khoản ngân hàng", "settings": "Cấu hình", "audit": "Kiểm tra hệ thống", "logs": "Nhật ký admin", "bots": "Quản lý bot", "notifications": "Thông báo bot", "backup": "Backup dữ liệu", "guide": "Hướng dẫn", "status": "Trạng thái", "imports": "Nhập/Xuất", "exports": "Báo cáo", "reconcile": "Đối soát", "coupons": "Mã giảm giá", "roles": "Phân quyền", "deliveries": "Lịch sử giao hàng", "low_stock": "Cảnh báo kho", "preorders": "Đặt trước",
         "login": "Đăng nhập", "logout": "Đăng xuất", "save": "Lưu thay đổi", "create": "Tạo mới",
         "import_stock": "Nhập kho", "confirm_payment": "Xác nhận thanh toán", "light": "Sáng", "dark": "Tối",
         "language": "Ngôn ngữ", "theme": "Giao diện", "welcome": "Trang quản lý NIMO Shop",
@@ -37,7 +38,7 @@ LANG = {
     "en": {
         "dashboard": "Dashboard", "orders": "Orders", "products": "Products", "categories": "Categories",
         "stock": "Inventory", "users": "Users", "wallets": "Wallets", "finance": "Finance",
-        "payments": "Payments", "settings": "Settings", "audit": "System Audit", "logs": "Admin Logs", "bots": "Bot Manager", "notifications": "Bot Notifications", "backup": "Data Backup", "guide": "Guide", "status": "Status", "imports": "Import/Export", "exports": "Reports", "reconcile": "Reconciliation", "coupons": "Coupons", "roles": "Roles", "deliveries": "Delivery Logs", "low_stock": "Low Stock", "preorders": "Preorders",
+        "payments": "Payments", "bank_accounts": "Bank Accounts", "settings": "Settings", "audit": "System Audit", "logs": "Admin Logs", "bots": "Bot Manager", "notifications": "Bot Notifications", "backup": "Data Backup", "guide": "Guide", "status": "Status", "imports": "Import/Export", "exports": "Reports", "reconcile": "Reconciliation", "coupons": "Coupons", "roles": "Roles", "deliveries": "Delivery Logs", "low_stock": "Low Stock", "preorders": "Preorders",
         "login": "Login", "logout": "Logout", "save": "Save changes", "create": "Create",
         "import_stock": "Import stock", "confirm_payment": "Confirm payment", "light": "Light", "dark": "Dark",
         "language": "Language", "theme": "Theme", "welcome": "NIMO Shop Admin",
@@ -51,7 +52,7 @@ NAV_GROUPS = [
     ("Tổng quan", [("/", "dashboard"), ("/status", "status"), ("/logs", "logs"), ("/audit", "audit")]),
     ("Bán hàng", [("/orders", "orders"), ("/preorders", "preorders"), ("/deliveries", "deliveries"), ("/coupons", "coupons"), ("/notifications", "notifications")]),
     ("Sản phẩm & kho", [("/categories", "categories"), ("/products", "products"), ("/stock", "stock"), ("/imports", "imports"), ("/low-stock", "low_stock")]),
-    ("Thanh toán & ví", [("/wallets", "wallets"), ("/payments", "payments"), ("/finance", "finance"), ("/reconcile", "reconcile"), ("/exports", "exports")]),
+    ("Thanh toán & ví", [("/wallets", "wallets"), ("/payments", "payments"), ("/bank-accounts", "bank_accounts"), ("/finance", "finance"), ("/reconcile", "reconcile"), ("/exports", "exports")]),
     ("Khách hàng & API", [("/users", "users")]),
     ("Hệ thống", [("/settings", "settings"), ("/bots", "bots"), ("/backup", "backup"), ("/roles", "roles"), ("/guide", "guide")]),
 ]
@@ -59,14 +60,14 @@ NAV_GROUPS = [
 NAV = [
     ("/", "dashboard"), ("/orders", "orders"), ("/preorders", "preorders"), ("/products", "products"), ("/categories", "categories"),
     ("/stock", "stock"), ("/users", "users"), ("/wallets", "wallets"), ("/finance", "finance"),
-    ("/payments", "payments"), ("/reconcile", "reconcile"), ("/bots", "bots"), ("/notifications", "notifications"),
+    ("/payments", "payments"), ("/bank-accounts", "bank_accounts"), ("/reconcile", "reconcile"), ("/bots", "bots"), ("/notifications", "notifications"),
     ("/backup", "backup"), ("/imports", "imports"), ("/exports", "exports"), ("/coupons", "coupons"), ("/low-stock", "low_stock"),
     ("/deliveries", "deliveries"), ("/roles", "roles"), ("/status", "status"), ("/settings", "settings"), ("/guide", "guide"), ("/audit", "audit"), ("/logs", "logs"),
 ]
 
 NAV_ICONS = {
     "dashboard": "◈", "orders": "🛒", "preorders": "🧾", "products": "📦", "categories": "🗂",
-    "stock": "🧱", "users": "👥", "wallets": "💳", "finance": "📈", "payments": "💸",
+    "stock": "🧱", "users": "👥", "wallets": "💳", "finance": "📈", "payments": "💸", "bank_accounts": "🏦",
     "reconcile": "🧮", "bots": "🤖", "notifications": "📣", "backup": "🛡", "imports": "📥",
     "exports": "📤", "coupons": "🎁", "low_stock": "⚠", "deliveries": "📨", "roles": "🔐",
     "status": "◎", "settings": "⚙", "guide": "❖", "audit": "🧪", "logs": "🪵",
@@ -91,6 +92,7 @@ PAGE_META = {
     "wallets": {"eyebrow": "Wallet desk", "desc": "Theo dõi số dư ví và xử lý cộng trừ thủ công một cách an toàn, rõ ràng."},
     "finance": {"eyebrow": "Finance overview", "desc": "Xem tổng quan dòng tiền, nghĩa vụ ví và lợi nhuận gộp theo từng loại tiền."},
     "payments": {"eyebrow": "Payment operations", "desc": "Theo dõi payment intent, giao dịch từ cổng thanh toán và xác nhận thủ công khi cần."},
+    "bank_accounts": {"eyebrow": "Bank receiving accounts", "desc": "Quản lý nhiều tài khoản ngân hàng nhận tiền: VietQR, API SePay/Pay2S/Casso/custom và tài khoản mặc định cho bot."},
     "settings": {"eyebrow": "System setup", "desc": "Cấu hình bot, ngân hàng, giao hàng và Web Admin theo từng nhóm rõ ràng."},
     "bots": {"eyebrow": "Bot workspace", "desc": "Quản lý nhiều bot Telegram trong cùng một panel: bot chính, bot hỗ trợ, bot thanh toán."},
     "notifications": {"eyebrow": "Broadcast center", "desc": "Tạo và theo dõi các chiến dịch thông báo gửi tới khách hàng trên Telegram."},
@@ -114,7 +116,8 @@ HEADER_ACTIONS = {
     "/stock": [("/imports", "Import dữ liệu", "secondary"), ("/products", "Sản phẩm", "ghost")],
     "/orders": [("/payments", "Thanh toán", "secondary"), ("/deliveries", "Lịch sử giao", "ghost")],
     "/settings": [("/status", "Kiểm tra hệ thống", "secondary"), ("/guide", "Hướng dẫn", "ghost")],
-    "/payments": [("/reconcile", "Đối soát", "secondary"), ("/wallets", "Ví khách", "ghost")],
+    "/payments": [("/bank-accounts", "Tài khoản ngân hàng", "secondary"), ("/reconcile", "Đối soát", "secondary"), ("/wallets", "Ví khách", "ghost")],
+    "/bank-accounts": [("/settings", "Cấu hình chung", "secondary"), ("/payments", "Thanh toán", "ghost")],
 }
 
 MODULE_HUB = [
@@ -122,6 +125,7 @@ MODULE_HUB = [
     ("/products", "products", "Quản lý catalog, ảnh sản phẩm và thông tin bán hàng."),
     ("/stock", "stock", "Nhập hàng số, chuẩn hóa dữ liệu và kiểm soát tồn kho."),
     ("/payments", "payments", "Kiểm tra thanh toán, payment intent và webhook."),
+    ("/bank-accounts", "bank_accounts", "Nhiều tài khoản nhận tiền, API SePay/Pay2S/Casso/custom và VietQR."),
     ("/wallets", "wallets", "Theo dõi số dư và các điều chỉnh ví khách."),
     ("/settings", "settings", "Cấu hình bot, giao hàng, ngân hàng và web admin."),
 ]
@@ -131,10 +135,10 @@ MODULE_HUB = [
 # policy simple and conservative for a commercial shop.
 ROLE_SECTIONS = {
     "owner": {"*"},
-    "finance": {"dashboard", "orders", "users", "wallets", "finance", "payments", "reconcile", "exports", "status", "audit", "guide"},
+    "finance": {"dashboard", "orders", "users", "wallets", "finance", "payments", "bank_accounts", "reconcile", "exports", "status", "audit", "guide"},
     "stock": {"dashboard", "orders", "products", "categories", "stock", "imports", "exports", "low_stock", "status", "audit", "guide"},
     "support": {"dashboard", "orders", "preorders", "users", "notifications", "deliveries", "status", "audit", "guide"},
-    "viewer": {"dashboard", "orders", "products", "categories", "stock", "users", "finance", "payments", "reconcile", "preorders", "deliveries", "status", "audit", "guide"},
+    "viewer": {"dashboard", "orders", "products", "categories", "stock", "users", "finance", "payments", "bank_accounts", "reconcile", "preorders", "deliveries", "status", "audit", "guide"},
 }
 
 POST_SECTIONS = {
@@ -150,6 +154,10 @@ POST_SECTIONS = {
     "/orders/refund": "orders",
     "/wallets/adjust": "wallets",
     "/payments/confirm": "payments",
+    "/bank-accounts/create": "bank_accounts",
+    "/bank-accounts/update": "bank_accounts",
+    "/bank-accounts/delete": "bank_accounts",
+    "/bank-accounts/default": "bank_accounts",
     "/bots/create": "bots",
     "/bots/update": "bots",
     "/bots/delete": "bots",
@@ -175,6 +183,7 @@ WRITE_ROLES = {
     "low_stock": {"owner", "stock"},
     "wallets": {"owner", "finance"},
     "payments": {"owner", "finance"},
+    "bank_accounts": {"owner", "finance"},
     "finance": {"owner", "finance"},
     "reconcile": {"owner", "finance"},
     "orders": {"owner", "finance", "support"},
@@ -226,7 +235,7 @@ SETTING_GROUPS = [
     },
     {
         "title": "3. Ngân hàng Việt Nam & SePay tự động",
-        "desc": "Nhập tài khoản nhận tiền và SePay API key. Khi bot chạy, SePay poller sẽ tự quét giao dịch, tìm mã NAP/ORD trong nội dung chuyển khoản và cộng ví/giao hàng tự động.",
+        "desc": "Cấu hình cũ cho 1 tài khoản chính. Khuyên dùng trang Thanh toán & ví → Tài khoản ngân hàng để thêm nhiều tài khoản MB/Vietcombank/ACB và API riêng từng tài khoản.",
         "keys": ["BANK_ENABLED", "BANK_BIN", "BANK_ACCOUNT", "BANK_OWNER", "BANK_NAME", "SEPAY_API_KEY", "SEPAY_POLL_SECONDS"],
     },
     {
@@ -255,9 +264,9 @@ SETTING_META: dict[str, dict[str, str]] = {
     "DEPOSIT_EXPIRES_MINUTES": {"label": "Hết hạn mã nạp ví sau", "help": "Số phút mã nạp ví còn hiệu lực.", "placeholder": "15"},
     "ORDER_EXPIRES_MINUTES": {"label": "Hết hạn đơn hàng sau", "help": "Số phút bot giữ hàng chờ khách thanh toán.", "placeholder": "20"},
     "BANK_ENABLED": {"label": "Bật nạp ngân hàng/VietQR", "help": "Bật để bot tạo mã NAP/ORD, số tiền và QR chuyển khoản ngân hàng.", "placeholder": "true"},
-    "SEPAY_API_KEY": {"label": "SePay API key quét tự động", "help": "API key để bot tự quét giao dịch ngân hàng. Nếu để trống, ngân hàng chỉ tạo QR và admin phải xác nhận thủ công.", "placeholder": "sepay_api_key"},
+    "SEPAY_API_KEY": {"label": "SePay API key quét tự động", "help": "Chỉ nhập API key lấy từ SePay sau khi liên kết tài khoản ngân hàng. Không nhập API/token riêng của MB Bank ở ô này. Nếu để trống hoặc nhập sai loại key, bot vẫn tạo QR nhưng không tự cộng ví.", "placeholder": "sepay_api_key_tu_trang_sepay"},
     "SEPAY_POLL_SECONDS": {"label": "Chu kỳ quét giao dịch", "help": "Số giây giữa mỗi lần bot gọi API SePay. Khuyến nghị 30 giây.", "placeholder": "30"},
-    "BANK_BIN": {"label": "Mã ngân hàng / Bank BIN", "help": "Mã VietQR của ngân hàng nhận tiền. Ví dụ MB: 970422, Vietcombank: 970436.", "placeholder": "970436"},
+    "BANK_BIN": {"label": "Mã ngân hàng / Bank BIN", "help": "Mã VietQR của ngân hàng nhận tiền. MB Bank: 970422, Vietcombank: 970436. Mã này chỉ dùng để tạo QR, không phải API tự quét.", "placeholder": "970422"},
     "BANK_ACCOUNT": {"label": "Số tài khoản nhận tiền", "help": "Số tài khoản ngân hàng của bạn để khách chuyển khoản.", "placeholder": "0123456789"},
     "BANK_OWNER": {"label": "Tên chủ tài khoản", "help": "Tên chủ tài khoản, nên viết đúng như app ngân hàng hiển thị.", "placeholder": "PHAM XUAN TOI"},
     "BANK_NAME": {"label": "Tên ngân hàng", "help": "Tên dễ nhớ để hiển thị cho khách. Ví dụ: Vietcombank, MB Bank.", "placeholder": "Vietcombank"},
@@ -285,38 +294,63 @@ SETTING_META: dict[str, dict[str, str]] = {
     "LOW_STOCK_THRESHOLD": {"label": "Ngưỡng cảnh báo hết hàng", "help": "Web sẽ cảnh báo khi tồn kho sản phẩm nhỏ hơn hoặc bằng số này.", "placeholder": "5"},
 }
 
+BANK_PRESETS: list[tuple[str, str, str]] = [
+    ("MB Bank", "MB Bank", "970422"),
+    ("Vietcombank", "Vietcombank", "970436"),
+    ("ACB", "ACB", "970416"),
+    ("Techcombank", "Techcombank", "970407"),
+    ("BIDV", "BIDV", "970418"),
+    ("VietinBank", "VietinBank", "970415"),
+    ("VPBank", "VPBank", "970432"),
+    ("TPBank", "TPBank", "970423"),
+    ("Sacombank", "Sacombank", "970403"),
+    ("Momo/VietQR tùy chỉnh", "", ""),
+]
+
+BANK_PROVIDER_DEFS: list[tuple[str, str, str]] = [
+    ("sepay", "SePay tự động", "Poller tự quét SePay bằng Bearer API key."),
+    ("pay2s", "Pay2S tự động", "Poller tự quét Pay2S bằng pay2s-token; webhook Pay2S dùng token riêng trong ô API secret."),
+    ("casso", "Casso/API tương thích", "Lưu API key/secret/base URL riêng cho tài khoản. Cần endpoint tương thích hoặc adapter riêng để tự quét live."),
+    ("custom", "API riêng ngân hàng/custom", "Dùng khi bạn có API ngân hàng riêng. Hệ thống lưu đủ key/secret/base URL; cần adapter tương ứng để tự quét."),
+    ("manual", "Chỉ tạo QR/thủ công", "Bot tạo VietQR đúng tài khoản và mã NAP/ORD, admin xác nhận thủ công khi tiền về."),
+]
+
 CSS = r"""
 :root{
-  --bg:#071321;--bg2:#0d1930;--panel:rgba(14,24,42,.90);--panel2:#13233f;--panel3:#1b3258;
-  --text:#eef4ff;--muted:#9eb0cf;--line:rgba(158,176,207,.18);--line-strong:rgba(158,176,207,.28);
-  --brand:#6ea8ff;--brand2:#a78bfa;--ok:#4ade80;--danger:#fb7185;--warn:#fbbf24;
-  --input:#0a1528;--shadow:0 24px 70px rgba(2,8,23,.42);--shadow-soft:0 18px 45px rgba(8,15,33,.28);
+  --bg:#000000;--bg2:#000000;--panel:#050505;--panel2:#0b0b0b;--panel3:#111111;
+  --text:#ffffff;--muted:#d4d4d4;--line:rgba(255,255,255,.18);--line-strong:rgba(255,255,255,.34);
+  --brand:#f5c542;--brand2:#f59e0b;--ok:#4ade80;--danger:#fb7185;--warn:#fbbf24;
+  --input:#000000;--shadow:0 24px 70px rgba(0,0,0,.86);--shadow-soft:0 18px 45px rgba(0,0,0,.7);
   --radius:22px;
 }
 html[data-theme="light"]{
-  --bg:#eef4fb;--bg2:#f8fbff;--panel:rgba(255,255,255,.90);--panel2:#edf4ff;--panel3:#f5f8ff;
-  --text:#0f172a;--muted:#64748b;--line:rgba(15,23,42,.08);--line-strong:rgba(15,23,42,.14);
-  --brand:#2563eb;--brand2:#7c3aed;--ok:#16a34a;--danger:#dc2626;--warn:#d97706;
-  --input:#fbfdff;--shadow:0 22px 55px rgba(15,23,42,.10);--shadow-soft:0 14px 35px rgba(15,23,42,.08);
+  --bg:#f5f7fb;--bg2:#ffffff;--panel:#ffffff;--panel2:#f1f5f9;--panel3:#e2e8f0;
+  --text:#050816;--muted:#263244;--line:rgba(15,23,42,.22);--line-strong:rgba(15,23,42,.4);
+  --brand:#1d4ed8;--brand2:#0f172a;--ok:#166534;--danger:#991b1b;--warn:#92400e;
+  --input:#ffffff;--shadow:0 22px 55px rgba(15,23,42,.14);--shadow-soft:0 14px 35px rgba(15,23,42,.1);
 }
-*{box-sizing:border-box}html,body{min-height:100%}body{margin:0;background:radial-gradient(circle at top left,rgba(110,168,255,.18),transparent 26%),radial-gradient(circle at top right,rgba(167,139,250,.14),transparent 24%),linear-gradient(180deg,var(--bg2),var(--bg));color:var(--text);font:15px/1.6 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+*{box-sizing:border-box}html,body{min-height:100%}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
 a{color:inherit;text-decoration:none}
-button,.btn{border:0;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;padding:11px 15px;border-radius:14px;cursor:pointer;font-weight:800;display:inline-flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 14px 28px rgba(37,99,235,.22)}
+button,.btn{border:0;background:linear-gradient(135deg,var(--brand),var(--brand2));color:#050505;padding:11px 15px;border-radius:14px;cursor:pointer;font-weight:800;display:inline-flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 14px 28px rgba(37,99,235,.22)}
 .btn.secondary,button.secondary{background:var(--panel2);color:var(--text);box-shadow:none;border:1px solid var(--line)}.btn.ghost,button.ghost{background:transparent;color:var(--text);border:1px solid var(--line);box-shadow:none}.btn.danger,button.danger{background:linear-gradient(135deg,#ef4444,#f43f5e);box-shadow:none}.btn.small,button.small{padding:8px 11px;border-radius:12px;font-size:13px}
-.layout{display:grid;grid-template-columns:300px 1fr;min-height:100vh}.sidebar{padding:22px 18px 22px 22px;background:rgba(8,15,29,.55);backdrop-filter:blur(20px);border-right:1px solid var(--line);position:fixed;top:0;left:0;width:300px;height:100vh;overflow:auto;z-index:20}.main{padding:26px 28px 34px;max-width:1600px;grid-column:2}
+.layout{display:grid;grid-template-columns:300px 1fr;min-height:100vh}.sidebar{padding:22px 18px 22px 22px;background:#000000;backdrop-filter:blur(20px);border-right:1px solid var(--line);position:fixed;top:0;left:0;width:300px;height:100vh;overflow:auto;z-index:20}.main{padding:26px 28px 34px;max-width:1600px;grid-column:2}html[data-theme="light"] .sidebar{background:rgba(255,255,255,.98);box-shadow:8px 0 30px rgba(15,23,42,.08)}html[data-theme="light"] .brand-badge{color:#fff}html[data-theme="light"] input,html[data-theme="light"] select,html[data-theme="light"] textarea{color:#050816;background:#fff;border-color:rgba(15,23,42,.32)}html[data-theme="light"] .btn.secondary,html[data-theme="light"] button.secondary{color:#0b1220}html[data-theme="dark"] body,html[data-theme="dark"] .sidebar{background:#000}.brand-badge{color:#050505}html[data-theme="light"] button,html[data-theme="light"] .btn{color:#fff}html[data-theme="light"] .btn.secondary,html[data-theme="light"] button.secondary{color:#050816;background:#fff;border-color:rgba(15,23,42,.3)}html[data-theme="light"] .btn.ghost,html[data-theme="light"] button.ghost{color:#050816;background:#fff;border-color:rgba(15,23,42,.3)}
 .brand-shell{padding:8px 6px 16px}.brand-badge{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;border-radius:999px;padding:7px 12px;font-size:12px;font-weight:900;letter-spacing:.03em;box-shadow:var(--shadow-soft)}.brand{font-weight:900;font-size:26px;letter-spacing:.2px;margin:12px 0 4px}.subtitle{color:var(--muted);font-size:13px;margin-bottom:16px}
-.workspace-card{padding:16px;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.02));border:1px solid var(--line);box-shadow:var(--shadow-soft);margin-bottom:16px}.workspace-label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800}.workspace-role{font-weight:900;margin:6px 0 8px}.workspace-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px}.workspace-metric{padding:10px 12px;border-radius:14px;background:var(--panel2);border:1px solid var(--line)}.workspace-metric b{display:block;font-size:16px}
+.workspace-card{padding:16px;border-radius:18px;background:#060606;border:1px solid var(--line);box-shadow:var(--shadow-soft);margin-bottom:16px}.workspace-label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800}.workspace-role{font-weight:900;margin:6px 0 8px}.workspace-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px}.workspace-metric{padding:10px 12px;border-radius:14px;background:var(--panel2);border:1px solid var(--line)}.workspace-metric b{display:block;font-size:16px}
 .nav-heading{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:900;margin:10px 0 6px;padding:9px 10px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;list-style:none;border-radius:12px}.nav-heading::-webkit-details-marker{display:none}.nav-group{margin-bottom:8px}.nav-group:not([open]) .nav-links{display:none}.nav-group[open] .nav-caret{transform:rotate(180deg)}.nav-caret{transition:transform .15s ease}.nav a{display:flex;align-items:center;gap:10px;padding:11px 13px;border-radius:15px;color:var(--muted);margin:5px 0;font-weight:800;border:1px solid transparent}.nav a.active,.nav a:hover{background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.03));color:var(--text);border-color:var(--line)}.nav-icon{width:34px;height:34px;border-radius:12px;display:grid;place-items:center;background:var(--panel2);font-size:16px;flex:0 0 34px}.nav-label{flex:1}.sidebar-footer{margin-top:18px;padding-top:18px;border-top:1px solid var(--line)}.sidebar-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.sidebar-actions .btn:last-child{grid-column:1/-1}
-.page-hero{display:flex;justify-content:space-between;align-items:flex-end;gap:18px;padding:26px 28px;border-radius:28px;background:linear-gradient(135deg,rgba(110,168,255,.16),rgba(167,139,250,.12) 45%,rgba(49,192,255,.08));border:1px solid var(--line);box-shadow:var(--shadow);margin-bottom:18px;position:relative;overflow:hidden}.eyebrow{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid var(--line);font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.page-title{font-size:34px;line-height:1.12;font-weight:900;margin:12px 0 8px}.page-lead{max-width:760px;color:var(--muted);margin:0}.hero-meta,.hero-actions,.toolbar,.action-row{display:flex;gap:10px;flex-wrap:wrap}.hero-meta{margin-top:16px}.main-badge,.pill{display:inline-flex;align-items:center;gap:8px;padding:8px 11px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-weight:800;font-size:12px}
-.content-stack{display:flex;flex-direction:column;gap:16px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.card{background:var(--panel);backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-soft);padding:20px}.section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:16px}.section-head h2,.section-head h3,.card h2,.card h3{margin:0}.card-subtitle,.muted,.help{color:var(--muted)}.metric-card{padding:18px;border-radius:22px;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.02));border:1px solid var(--line);box-shadow:var(--shadow-soft)}.metric-top{display:flex;justify-content:space-between;align-items:center;gap:10px}.metric-label{color:var(--muted);font-weight:700}.metric{font-size:32px;font-weight:900;line-height:1.1;margin:10px 0 4px}.metric-note{font-size:13px;color:var(--muted)}
-.module-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.module-card{display:flex;gap:14px;padding:18px;border-radius:20px;background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.02));border:1px solid var(--line);box-shadow:var(--shadow-soft)}.module-icon{width:48px;height:48px;border-radius:16px;background:linear-gradient(135deg,var(--panel2),var(--panel3));display:grid;place-items:center;font-size:20px;flex:0 0 48px}.module-title{font-weight:900;margin-bottom:4px}.module-note{font-size:13px;color:var(--muted)}.module-arrow{margin-left:auto;color:var(--muted);font-weight:900}
+.page-hero{display:flex;justify-content:space-between;align-items:flex-end;gap:18px;padding:26px 28px;border-radius:28px;background:#050505;border:1px solid var(--line);box-shadow:var(--shadow);margin-bottom:18px;position:relative;overflow:hidden}.eyebrow{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid var(--line);font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.page-title{font-size:34px;line-height:1.12;font-weight:900;margin:12px 0 8px}.page-lead{max-width:760px;color:var(--muted);margin:0}.hero-meta,.hero-actions,.toolbar,.action-row{display:flex;gap:10px;flex-wrap:wrap}.hero-meta{margin-top:16px}.main-badge,.pill{display:inline-flex;align-items:center;gap:8px;padding:8px 11px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-weight:800;font-size:12px}
+.content-stack{display:flex;flex-direction:column;gap:16px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.card{background:var(--panel);backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-soft);padding:20px}.section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:16px}.section-head h2,.section-head h3,.card h2,.card h3{margin:0}.card-subtitle,.muted,.help{color:var(--muted)}.metric-card{padding:18px;border-radius:22px;background:#070707;border:1px solid var(--line);box-shadow:var(--shadow-soft)}.metric-top{display:flex;justify-content:space-between;align-items:center;gap:10px}.metric-label{color:var(--muted);font-weight:700}.metric{font-size:32px;font-weight:900;line-height:1.1;margin:10px 0 4px}.metric-note{font-size:13px;color:var(--muted)}
+.module-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.module-card{display:flex;gap:14px;padding:18px;border-radius:20px;background:#070707;border:1px solid var(--line);box-shadow:var(--shadow-soft)}.module-icon{width:48px;height:48px;border-radius:16px;background:linear-gradient(135deg,var(--panel2),var(--panel3));display:grid;place-items:center;font-size:20px;flex:0 0 48px}.module-title{font-weight:900;margin-bottom:4px}.module-note{font-size:13px;color:var(--muted)}.module-arrow{margin-left:auto;color:var(--muted);font-weight:900}
 .status{display:inline-flex;padding:6px 10px;border-radius:999px;background:var(--panel2);font-size:12px;font-weight:900;border:1px solid var(--line)}.status.delivered,.status.paid,.status.order_delivered,.status.wallet_credited,.status.active{color:var(--ok)}.status.cancelled,.status.refunded,.status.rejected,.status.unmatched,.status.inactive{color:var(--danger)}.status.awaiting_payment,.status.pending,.status.reserved,.status.awaiting_deposit{color:var(--warn)}
 .stat-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.stat-chip{padding:14px 16px;border-radius:18px;background:var(--panel2);border:1px solid var(--line)}.stat-chip b{font-size:22px;display:block;line-height:1.15;margin-bottom:2px}
 .table-wrap{overflow:auto;border-radius:18px;border:1px solid var(--line)}.premium-table{min-width:900px}table{width:100%;border-collapse:collapse}th,td{padding:13px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.05em;background:rgba(255,255,255,.02)}tr:hover td{background:rgba(110,168,255,.045)}
 label{font-weight:800;display:block}input,select,textarea{width:100%;border:1px solid var(--line);background:var(--input);color:var(--text);padding:11px 13px;border-radius:14px;font:inherit;margin-top:7px;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}textarea{min-height:110px;resize:vertical}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.form-grid .full{grid-column:1/-1}
 .alert{padding:14px 16px;border-radius:16px;background:var(--panel2);border:1px solid var(--line)}.alert.ok{border-color:rgba(34,197,94,.35)}.alert.err{border-color:rgba(239,68,68,.35);color:var(--danger)}
 .login{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at top left,rgba(110,168,255,.18),transparent 26%),radial-gradient(circle at bottom right,rgba(167,139,250,.18),transparent 22%),linear-gradient(180deg,var(--bg2),var(--bg))}.login-card{max-width:460px;width:100%;padding:28px 24px}.hint-box,.info-box{border-left:4px solid var(--brand);background:var(--panel2);padding:14px 16px;border-radius:16px;margin-bottom:16px}.checkbox-row{display:flex;align-items:center;gap:10px;font-weight:800}.checkbox-row input{width:auto;margin:0}
-details.setup-section{border:1px solid var(--line);border-radius:20px;background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.02));margin-bottom:14px;overflow:hidden;box-shadow:var(--shadow-soft)}details.setup-section summary{cursor:pointer;padding:18px 20px;font-weight:900;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:12px;background:rgba(255,255,255,.035);border:1px solid transparent}details.setup-section summary:hover{border-color:var(--line-strong);background:rgba(255,255,255,.06)}details.setup-section summary::-webkit-details-marker{display:none}details.setup-section summary:before{content:"▣";width:36px;height:36px;border-radius:13px;background:var(--panel2);display:grid;place-items:center;flex:0 0 36px}.setup-content{border-top:1px solid var(--line);padding:18px}.setting-field{background:rgba(255,255,255,.025);border:1px solid var(--line);border-radius:16px;padding:14px}.setting-field:hover{border-color:var(--line-strong)}code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}pre{white-space:pre-wrap;word-break:break-word;background:rgba(255,255,255,.04);padding:12px;border-radius:14px;border:1px solid var(--line)}
+details.setup-section{border:1px solid var(--line);border-radius:20px;background:var(--panel);margin-bottom:14px;overflow:hidden;box-shadow:var(--shadow-soft)}details.setup-section summary{cursor:pointer;padding:18px 20px;font-weight:900;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--panel2);border:1px solid transparent}details.setup-section summary:hover{border-color:var(--line-strong);background:var(--panel3)}details.setup-section summary::-webkit-details-marker{display:none}details.setup-section summary:before{content:"▣";width:36px;height:36px;border-radius:13px;background:var(--panel2);display:grid;place-items:center;flex:0 0 36px}.setup-content{border-top:1px solid var(--line);padding:18px}.setting-field{background:var(--panel2);border:1px solid var(--line);border-radius:16px;padding:14px}.setting-field:hover{border-color:var(--line-strong)}code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}pre{white-space:pre-wrap;word-break:break-word;background:rgba(255,255,255,.04);padding:12px;border-radius:14px;border:1px solid var(--line)}
+
+html[data-theme="light"] .page-hero,html[data-theme="light"] .workspace-card,html[data-theme="light"] .metric-card,html[data-theme="light"] .module-card{background:#ffffff}
+html[data-theme="light"] th{background:#eaf0f8;color:#1e293b}html[data-theme="light"] tr:hover td{background:#f1f5f9}
+.bank-template-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 16px}.bank-template{padding:12px 13px;border:1px solid var(--line);border-radius:16px;background:var(--panel2);font-weight:900}.bank-template small{display:block;color:var(--muted);font-weight:700;margin-top:2px}.bank-provider-help{border:1px solid var(--line-strong);border-radius:18px;background:var(--panel2);padding:14px 16px;margin:12px 0}.bank-provider-help b{color:var(--text)}
 @media(max-width:1180px){.layout{grid-template-columns:1fr}.sidebar{position:relative;width:auto;height:auto}.main{grid-column:1}.module-grid,.grid,.grid2,.grid3,.stat-strip,.form-grid,.workspace-meta{grid-template-columns:1fr}.main{padding:18px}.page-hero{padding:20px;display:block}.hero-actions{margin-top:16px}.sidebar-actions{grid-template-columns:1fr 1fr}}
 """
 
@@ -569,7 +603,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         user = esc(session.username if session else "")
         role_label = esc(ROLE_LABELS.get(role, role))
         header_actions = self._header_actions(active)
-        return f"""<!doctype html><html lang="{esc(lang)}" data-theme="{esc(theme)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(tr(lang,title_key))} - NIMO</title><style>{CSS}</style></head><body><div class="layout"><aside class="sidebar"><div class="brand-shell"><div class="brand-badge">Luxury Admin</div><div class="brand">NIMO Shop</div><div class="subtitle">{tr(lang,'admin_panel')} · {user}</div></div><div class="workspace-card"><div class="workspace-label">Workspace</div><div class="workspace-role">{role_label}</div><div class="workspace-meta"><div class="workspace-metric"><span class="muted">Theme</span><b>{esc(theme.title())}</b></div><div class="workspace-metric"><span class="muted">Lang</span><b>{esc(lang.upper())}</b></div></div></div><nav class="nav">{nav}</nav><div class="sidebar-footer"><div class="sidebar-actions"><a class="btn secondary small" href="?{toolbar_qs_light}">☀ {tr(lang,'light')}</a><a class="btn secondary small" href="?{toolbar_qs_dark}">🌙 {tr(lang,'dark')}</a><a class="btn ghost small" href="?{toolbar_qs_lang}">⇄ {switch_lang.upper()}</a><a class="btn danger small" href="/logout">{tr(lang,'logout')}</a></div></div></aside><main class="main"><section class="page-hero"><div><div class="eyebrow">{esc(eyebrow)}</div><h1 class="page-title">{esc(tr(lang,title_key))}</h1><p class="page-lead">{esc(page_desc)}</p><div class="hero-meta"><span class="main-badge">{esc(user)}</span><span class="main-badge">{role_label}</span><span class="main-badge">NIMO workspace</span></div></div><div class="hero-actions">{header_actions}</div></section>{msg}<div class="content-stack">{body}</div></main></div><script>(function(){{var s=document.querySelector('.sidebar');if(!s)return;var k='nimo_sidebar_scroll';var y=localStorage.getItem(k);if(y!==null)s.scrollTop=parseInt(y,10)||0;s.addEventListener('scroll',function(){{localStorage.setItem(k,String(s.scrollTop));}},{{passive:true}});document.querySelectorAll('.nav-group[data-nav-group]').forEach(function(d){{var key='nimo_nav_group_'+d.dataset.navGroup;var saved=localStorage.getItem(key);if(saved==='open')d.open=true;if(saved==='closed')d.open=false;d.addEventListener('toggle',function(){{localStorage.setItem(key,d.open?'open':'closed');}});}});}})();</script></body></html>"""
+        return f"""<!doctype html><html lang="{esc(lang)}" data-theme="{esc(theme)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(tr(lang,title_key))} - NIMO</title><style>{CSS}</style></head><body><div class="layout"><aside class="sidebar"><div class="brand-shell"><div class="brand-badge">Luxury Admin</div><div class="brand">NIMO Shop</div><div class="subtitle">{tr(lang,'admin_panel')} · {user}</div></div><div class="workspace-card"><div class="workspace-label">Workspace</div><div class="workspace-role">{role_label}</div><div class="workspace-meta"><div class="workspace-metric"><span class="muted">Theme</span><b>{esc(theme.title())}</b></div><div class="workspace-metric"><span class="muted">Lang</span><b>{esc(lang.upper())}</b></div></div></div><nav class="nav">{nav}</nav><div class="sidebar-footer"><div class="sidebar-actions"><a class="btn secondary small" href="?{toolbar_qs_light}">☀ {tr(lang,'light')}</a><a class="btn secondary small" href="?{toolbar_qs_dark}">🌙 {tr(lang,'dark')}</a><a class="btn ghost small" href="?{toolbar_qs_lang}">⇄ {switch_lang.upper()}</a><a class="btn danger small" href="/logout">{tr(lang,'logout')}</a></div></div></aside><main class="main"><section class="page-hero"><div><div class="eyebrow">{esc(eyebrow)}</div><h1 class="page-title">{esc(tr(lang,title_key))}</h1><p class="page-lead">{esc(page_desc)}</p><div class="hero-meta"><span class="main-badge">{esc(user)}</span><span class="main-badge">{role_label}</span><span class="main-badge">NIMO workspace</span></div></div><div class="hero-actions">{header_actions}</div></section>{msg}<div class="content-stack">{body}</div></main></div><script>(function(){{var s=document.querySelector('.sidebar');if(!s)return;var k='nimo_sidebar_scroll';var y=localStorage.getItem(k);if(y!==null)s.scrollTop=parseInt(y,10)||0;s.addEventListener('scroll',function(){{localStorage.setItem(k,String(s.scrollTop));}},{{passive:true}});document.querySelectorAll('.nav-group[data-nav-group]').forEach(function(d){{var key='nimo_nav_group_'+d.dataset.navGroup;var saved=localStorage.getItem(key);if(saved==='open')d.open=true;if(saved==='closed')d.open=false;d.addEventListener('toggle',function(){{localStorage.setItem(key,d.open?'open':'closed');}});}});document.querySelectorAll('select[data-bank-preset]').forEach(function(sel){{sel.addEventListener('change',function(){{var opt=sel.options[sel.selectedIndex];var form=sel.closest('form');if(!form||!opt)return;var name=opt.getAttribute('data-bank-name')||'';var bin=opt.getAttribute('data-bank-bin')||'';if(name){{var n=form.querySelector('input[name=bank_name]');if(n)n.value=name;var l=form.querySelector('input[name=label]');if(l&&!l.value)l.value=name+' nhận tiền';}}if(bin){{var b=form.querySelector('input[name=bank_bin]');if(b)b.value=bin;}}}});}});}})();</script></body></html>"""
 
     def _login_page(self, error: str = "") -> str:
         lang, theme = self._theme_lang()
@@ -622,6 +656,43 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return str(value or os.getenv(key) or fallback or "").strip()
         except Exception:
             return str(os.getenv(key) or fallback or "").strip()
+
+
+    def _verify_pay2s_webhook_request(self) -> bool:
+        """Validate Pay2S webhook Authorization: Bearer <webhook_token>.
+
+        Pay2S gives each webhook a token and sends it in the Authorization
+        header. Store that token in the bank account's API secret / Webhook
+        token field for provider=pay2s. If no Pay2S token is configured, reject
+        instead of silently accepting money webhooks.
+        """
+        auth = self.headers.get("Authorization", "").strip()
+        if not auth.lower().startswith("bearer "):
+            return False
+        received = auth.split(" ", 1)[1].strip()
+        if not received:
+            return False
+        try:
+            for account in self.service.list_bank_accounts():
+                if str(account.get("provider") or "").lower() != "pay2s":
+                    continue
+                token = str(account.get("api_secret") or "").strip()
+                if token and hmac.compare_digest(received, token):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    @staticmethod
+    def _pay2s_transactions_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        transactions = payload.get("transactions")
+        if isinstance(transactions, list):
+            return [dict(item) for item in transactions if isinstance(item, dict)]
+        # Some integrations may send a single transaction object instead of an
+        # array. Accept it so test/webhook tools can be used without wrapping.
+        if any(k in payload for k in ("transaction_id", "transactionNumber", "content", "description", "transferAmount", "amount")):
+            return [payload]
+        return []
 
     def _verify_binance_webhook_request(self, raw_body: str) -> bool:
         secret = self._setting_value("BINANCE_PAY_SECRET_KEY")
@@ -801,7 +872,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                 cookies.append(f"nimo_theme={query['theme'][0]}; Path=/; SameSite=Lax")
             if "lang" in query:
                 cookies.append(f"nimo_lang={query['lang'][0]}; Path=/; SameSite=Lax")
-            if cookies and parsed.path in {"/", "/orders", "/products", "/categories", "/stock", "/users", "/wallets", "/finance", "/payments", "/preorders", "/settings", "/audit", "/logs", "/bots", "/notifications", "/backup", "/guide", "/status", "/imports", "/exports", "/reconcile", "/coupons", "/roles", "/deliveries", "/low-stock"}:
+            if cookies and parsed.path in {"/", "/orders", "/products", "/categories", "/stock", "/users", "/wallets", "/finance", "/payments", "/bank-accounts", "/preorders", "/settings", "/audit", "/logs", "/bots", "/notifications", "/backup", "/guide", "/status", "/imports", "/exports", "/reconcile", "/coupons", "/roles", "/deliveries", "/low-stock"}:
                 self._redirect(parsed.path, cookies)
                 return
         if parsed.path == "/static/style.css":
@@ -858,14 +929,19 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/telegram-buyer/purchase":
             self._api_purchase()
             return
-        if parsed.path in {"/webhook/sepay", "/webhook/binance"}:
+        if parsed.path in {"/webhook/sepay", "/webhook/binance", "/webhook/pay2s"}:
             try:
                 raw = self._read_limited_body(max_bytes=128 * 1024).decode("utf-8")
             except Exception as exc:
                 self._send(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), status=413, content_type="application/json; charset=utf-8")
                 return
             is_binance_native = parsed.path.endswith("binance") and bool(self.headers.get("BinancePay-Signature"))
-            if is_binance_native:
+            is_pay2s = parsed.path.endswith("pay2s")
+            if is_pay2s:
+                if not self._verify_pay2s_webhook_request():
+                    self._send(json.dumps({"success": False, "error": "invalid_pay2s_token"}, ensure_ascii=False), status=401, content_type="application/json; charset=utf-8")
+                    return
+            elif is_binance_native:
                 if not self._verify_binance_webhook_request(raw):
                     self._send(json.dumps({"ok": False, "error": "invalid_binance_signature"}, ensure_ascii=False), status=401, content_type="application/json; charset=utf-8")
                     return
@@ -874,6 +950,28 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                 return
             try:
                 payload = json.loads(raw) if raw.strip().startswith("{") else {k: v[-1] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+                if is_pay2s:
+                    results = []
+                    for tx in self._pay2s_transactions_from_payload(payload):
+                        # Pay2S webhook format: id/transactionNumber, content,
+                        # transferAmount, transferType=IN. Only incoming rows
+                        # should be reconciled against NAP/ORD codes.
+                        direction = str(tx.get("transferType") or tx.get("type") or "IN").upper()
+                        if direction not in {"IN", "CREDIT", "RECEIVE", "RECEIVED", "+"}:
+                            results.append({"status": "ignored", "reason": "not_incoming"})
+                            continue
+                        result = self.service.ingest_webhook_event(
+                            provider="bank",
+                            tx_id="pay2s:webhook:" + str(tx.get("id") or tx.get("transactionNumber") or tx.get("transaction_id") or tx.get("checksum") or ""),
+                            amount=str(tx.get("transferAmount") or tx.get("amount") or tx.get("amount_in") or "0"),
+                            currency="VND",
+                            description=str(tx.get("content") or tx.get("description") or tx.get("transaction_content") or ""),
+                            raw={"_provider_source": "pay2s_webhook", **tx},
+                        )
+                        results.append(result)
+                    # Pay2S expects HTTP 200 and {success:true} to stop retrying.
+                    self._send(json.dumps({"success": True, "results": results}, ensure_ascii=False), content_type="application/json; charset=utf-8")
+                    return
                 if is_binance_native:
                     parsed_binance = self._parse_binance_webhook_payload(payload)
                     if parsed_binance["status"] and parsed_binance["status"] not in {"PAY_SUCCESS", "SUCCESS", "PAID"}:
@@ -963,6 +1061,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return self._page("finance", self._finance(), active="/finance")
         if path == "/payments":
             return self._page("payments", self._payments(), active="/payments")
+        if path == "/bank-accounts":
+            return self._page("bank_accounts", self._bank_accounts_page(), active="/bank-accounts")
         if path == "/bots":
             return self._page("bots", self._bots(), active="/bots")
         if path == "/notifications":
@@ -1050,6 +1150,18 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         if path == "/payments/confirm":
             self.service.confirm_payment(payment_code=form["payment_code"], tx_id=form["tx_id"], amount=form["amount"], currency=form["currency"], provider=form["provider"], admin_id=admin_id)
             return "/payments"
+        if path == "/bank-accounts/create":
+            self.service.create_bank_account(form, admin_id=admin_id)
+            return "/bank-accounts"
+        if path == "/bank-accounts/update":
+            self.service.update_bank_account(int(form["id"]), form, admin_id=admin_id)
+            return "/bank-accounts"
+        if path == "/bank-accounts/delete":
+            self.service.delete_bank_account(int(form["id"]), admin_id=admin_id)
+            return "/bank-accounts"
+        if path == "/bank-accounts/default":
+            self.service.set_default_bank_account(int(form["id"]), admin_id=admin_id)
+            return "/bank-accounts"
         if path == "/bots/create":
             self.service.create_managed_bot(form, admin_id=admin_id)
             return "/bots"
@@ -1340,6 +1452,94 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         sales_rows = "".join(f'<tr><td>{esc(r["currency"])}</td><td>{money(r["revenue_minor"], r["currency"])}</td><td>{money(r["cost_minor"], r["currency"])}</td><td>{money(int(r["revenue_minor"] or 0)-int(r["cost_minor"] or 0), r["currency"])}</td><td>{r["orders"]}</td></tr>' for r in s["sales"])
         return f'<div class="grid2"><div class="card"><h3>Sổ dòng tiền</h3><table><tr><th>Tiền</th><th>Cổng</th><th>Hướng</th><th>Số tiền</th><th>Phí</th><th>Số GD</th></tr>{cash_rows}</table></div><div class="card"><h3>Tiền đang nằm trong ví khách</h3><table><tr><th>Tiền</th><th>Tổng ví</th><th>Số ví</th></tr>{wallet_rows}</table></div></div><div class="card"><h3>Doanh thu / lãi gộp</h3><table><tr><th>Tiền</th><th>Doanh thu</th><th>Giá vốn</th><th>Lãi gộp</th><th>Đơn</th></tr>{sales_rows}</table></div>'
 
+    def _bank_provider_options(self, current: str = "sepay") -> str:
+        return "".join(
+            f'<option value="{esc(value)}" {selected(current, value)}>{esc(label)}</option>'
+            for value, label, _help in BANK_PROVIDER_DEFS
+        )
+
+    def _bank_preset_select(self) -> str:
+        options = ['<option value="">-- Chọn nhanh ngân hàng --</option>']
+        for label, bank_name, bank_bin in BANK_PRESETS:
+            suffix = f" · {bank_bin}" if bank_bin else ""
+            options.append(
+                f'<option value="{esc(label)}" data-bank-name="{esc(bank_name)}" data-bank-bin="{esc(bank_bin)}">{esc(label)}{esc(suffix)}</option>'
+            )
+        return '<label>Chọn ngân hàng<select data-bank-preset>' + ''.join(options) + '</select><div class="help">Chọn nhanh để tự điền tên ngân hàng và Bank BIN VietQR, sau đó nhập số tài khoản/API.</div></label>'
+
+    def _bank_provider_help(self) -> str:
+        rows = ''.join(f'<div class="bank-template"><b>{esc(label)}</b><small>{esc(help_text)}</small></div>' for _value, label, help_text in BANK_PROVIDER_DEFS)
+        presets = ''.join(f'<div class="bank-template"><b>{esc(label)}</b><small>BIN: {esc(bank_bin or "tự nhập")}</small></div>' for label, _bank_name, bank_bin in BANK_PRESETS[:8])
+        return (
+            '<div class="bank-provider-help"><b>Nhập API theo từng tài khoản ngân hàng:</b><br>'
+            'Mỗi ngân hàng/tài khoản có Bank BIN, số tài khoản, provider API và API key riêng. '
+            'Tự động live hiện hỗ trợ sẵn <b>SePay</b> và <b>Pay2S</b>. Casso/custom lưu đủ trường để tích hợp adapter riêng khi có tài liệu API chính xác.</div>'
+            f'<div class="bank-template-grid">{presets}</div>'
+            f'<div class="bank-template-grid">{rows}</div>'
+        )
+
+    def _bank_account_form(self, *, action: str, submit_label: str, account: dict[str, Any] | None = None) -> str:
+        account = account or {}
+        hidden_id = f'<input type="hidden" name="id" value="{int(account["id"])}">' if account.get("id") else ""
+        provider = str(account.get("provider") or "sepay")
+        api_hint = "Đã lưu - để trống nếu không đổi" if str(account.get("api_key") or "") else "API key/token của provider này"
+        enabled_checked = "checked" if bool(account.get("is_enabled", True)) else ""
+        default_checked = "checked" if bool(account.get("is_default", False)) else ""
+        return f'''
+        <form method="post" action="{action}" class="form-grid bank-form">
+          {self._form_csrf()}{hidden_id}
+          {self._bank_preset_select()}
+          <label>Tên hiển thị<input name="label" value="{esc(account.get('label') or '')}" required placeholder="MB Bank chính / VCB dự phòng"></label>
+          <label>Tên ngân hàng<input name="bank_name" value="{esc(account.get('bank_name') or '')}" required placeholder="MB Bank / Vietcombank / ACB"></label>
+          <label>Bank BIN VietQR<input name="bank_bin" value="{esc(account.get('bank_bin') or '')}" required placeholder="970422"><div class="help">Dùng để tạo QR. Không phải API key.</div></label>
+          <label>Số tài khoản nhận tiền<input name="account_no" value="{esc(account.get('account_no') or '')}" required placeholder="Số tài khoản khách chuyển vào"></label>
+          <label>Chủ tài khoản<input name="account_name" value="{esc(account.get('account_name') or '')}" required placeholder="PHAM XUAN TOI"></label>
+          <label>Provider API quét giao dịch<select name="provider">{self._bank_provider_options(provider)}</select><div class="help">SePay và Pay2S = tự quét đang hỗ trợ sẵn. Casso/custom = lưu API riêng để tích hợp adapter hoặc xác nhận thủ công.</div></label>
+          <label>API key / Access token<input type="password" name="api_key" placeholder="{esc(api_hint)}"><div class="help">SePay: nhập Bearer API key SePay. Pay2S: nhập pay2s-token của Pay2S. Không nhập mật khẩu internet banking.</div></label>
+          <label>API secret / Webhook token<input type="password" name="api_secret" placeholder="Pay2S webhook token hoặc client secret nếu provider cần"><div class="help">Pay2S webhook gửi Authorization: Bearer &lt;token&gt;; dán token đó ở đây nếu dùng /webhook/pay2s.</div></label>
+          <label>Base URL / Endpoint API<input name="base_url" value="{esc(account.get('base_url') or '')}" placeholder="Để trống dùng mặc định SePay/Pay2S, hoặc nhập endpoint custom"></label>
+          <label>Chu kỳ quét giây<input name="poll_seconds" value="{int(account.get('poll_seconds') or 30)}" placeholder="30"></label>
+          <label class="checkbox-row"><input type="checkbox" name="is_enabled" {enabled_checked}> Bật tài khoản này</label>
+          <label class="checkbox-row"><input type="checkbox" name="is_default" {default_checked}> Dùng làm mặc định</label>
+          <label class="full">Ghi chú<textarea name="notes" placeholder="Ví dụ: MB chính, đã liên kết SePay, dùng nhận nạp ví VND...">{esc(account.get('notes') or '')}</textarea></label>
+          <button>{esc(submit_label)}</button>
+        </form>
+        '''
+
+    def _bank_accounts_panel(self, *, compact: bool = False) -> str:
+        rows: list[str] = []
+        for b in self.service.list_bank_accounts():
+            provider = str(b.get("provider") or "sepay")
+            state = "Mặc định" if b.get("is_default") else ("Bật" if b.get("is_enabled") else "Tắt")
+            auto = "Auto SePay" if provider == "sepay" and str(b.get("api_key") or "").strip() else ("Auto Pay2S" if provider == "pay2s" and str(b.get("api_key") or "").strip() else ("QR thủ công" if provider == "manual" else "API lưu cấu hình"))
+            open_attr = "open" if b.get("is_default") else ""
+            rows.append(f'''
+            <details class="setup-section" {open_attr}>
+              <summary><span>🏦 {esc(b.get('label') or b.get('bank_name'))} · {esc(b.get('account_no'))}</span><span class="pill">{esc(state)} · {esc(auto)}</span></summary>
+              <div class="setup-content">
+                {self._bank_account_form(action="/bank-accounts/update", submit_label="Lưu tài khoản", account=b)}
+                <div class="action-row" style="margin-top:12px">
+                  <form method="post" action="/bank-accounts/default">{self._form_csrf()}<input type="hidden" name="id" value="{int(b['id'])}"><button class="secondary small">Đặt mặc định</button></form>
+                  <form method="post" action="/bank-accounts/delete" onsubmit="return confirm('Xóa tài khoản ngân hàng này?');">{self._form_csrf()}<input type="hidden" name="id" value="{int(b['id'])}"><button class="danger small">Xóa</button></form>
+                </div>
+              </div>
+            </details>
+            ''')
+        empty = '<div class="alert">Chưa có tài khoản ngân hàng. Thêm MB Bank/Vietcombank/ACB ở form bên dưới.</div>' if not rows else ''
+        title = "🏦 Tài khoản ngân hàng & API nhận tiền" if compact else "🏦 Tài khoản ngân hàng nhận tiền"
+        desc = "Nhập API cho từng ngân hàng/từng tài khoản ngay tại đây. Khách có thể chọn ngân hàng khi nạp tiền; bot tạo VietQR đúng tài khoản." if compact else "Module nhiều tài khoản: khách có thể chọn ngân hàng khi nạp/chuyển khoản. Mỗi tài khoản có Bank BIN, số tài khoản, provider API và API key riêng."
+        create_title = "＋ Thêm ngân hàng/API mới" if compact else "Thêm tài khoản ngân hàng"
+        return f'''
+        <div class="card"><div class="section-head"><div><h2>{title}</h2><p class="muted">{desc}</p></div><a class="btn secondary" href="/payments">Xem giao dịch</a></div>
+        {self._bank_provider_help()}
+        </div>
+        <div class="card"><h3>{create_title}</h3>{self._bank_account_form(action="/bank-accounts/create", submit_label="Thêm tài khoản")}</div>
+        <div class="card"><h3>Danh sách tài khoản</h3>{empty}{''.join(rows)}</div>
+        '''
+
+    def _bank_accounts_page(self) -> str:
+        return self._bank_accounts_panel(compact=False)
+
     def _payments(self) -> str:
         form = f'<div class="card"><h3>Xác nhận thanh toán thủ công</h3><p class="muted">Dùng khi khách đã chuyển khoản nhưng SePay/Binance chưa tự nhận. Nhập đúng mã ORD... hoặc NAP...</p><form method="post" action="/payments/confirm" class="form-grid">{self._form_csrf()}<label>Mã thanh toán<input name="payment_code" placeholder="ORD... / NAP..." required></label><label>Mã giao dịch / TX ID<input name="tx_id" required placeholder="Mã duy nhất, không nhập trùng"></label><label>Số tiền<input name="amount" required placeholder="150000"></label><label>Tiền tệ<select name="currency"><option>VND</option><option>USDT</option><option>USD</option></select></label><label>Cổng thanh toán<input name="provider" value="bank" placeholder="bank / sepay / binance"></label><button>{tr(self._theme_lang()[0],"confirm_payment")}</button></form></div>'
         events = "".join(f'<tr><td>{e["id"]}</td><td>{esc(e["provider"])}</td><td>{esc(e["provider_tx_id"])}</td><td>{esc(e["payment_code"])}</td><td>{money(e["amount_minor"], e["currency"])}</td><td>{status_badge(e["status"])}</td><td>{esc(e["created_at"])}</td></tr>' for e in self.service.list_payment_events())
@@ -1378,7 +1578,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             fields = "".join(self._setting_input(key, settings.get(key, {"value": DEFAULT_SETTING_KEYS[key][0], "is_secret": DEFAULT_SETTING_KEYS[key][1]})) for key in group["keys"])
             open_attr = " open" if idx == 0 else ""
             groups.append(f'''<details class="setup-section"{open_attr}><summary><span>{esc(group["title"])}</span><span class="pill">Bấm để mở / thu gọn</span></summary><div class="setup-content"><p class="muted">{esc(group["desc"])}</p><div class="form-grid">{fields}</div></div></details>''')
-        return f'''<div class="hint-box"><b>Hướng dẫn cấu hình theo nhóm:</b><br>1) Nhập Bot Token và Telegram ID admin trước. 2) Nếu dùng ngân hàng, bật Bank và nhập Bank BIN/Số tài khoản/Chủ tài khoản/SePay API key. 3) Trong mục <b>Giao hàng cho khách</b>, chọn đơn nhỏ hiện trực tiếp hay mọi đơn đều gửi file. 4) Tick “Ghi ra file .env”. 5) Lưu xong restart bot/web để áp dụng biến môi trường.</div><div class="card"><div class="section-head"><div><h2>Cấu hình hệ thống</h2><div class="card-subtitle">Các phần liên quan đã được gom theo nhóm: shop & admin, bot, thanh toán, giao hàng và web admin.</div></div></div><form method="post" action="/settings">{self._form_csrf()}{"".join(groups)}<label style="display:flex;gap:10px;align-items:center;font-weight:800"><input style="width:auto;margin:0" type="checkbox" name="write_env"> Ghi ra file .env để áp dụng sau khi restart bot/web</label><br><button>{tr(self._theme_lang()[0],"save")}</button></form></div>'''
+        bank_panel = self._bank_accounts_panel(compact=True)
+        return f'''<div class="hint-box"><b>Lưu ý quan trọng về tự động nhận tiền:</b><br>Phần ngân hàng bên dưới cho phép thêm <b>nhiều tài khoản</b>, mỗi tài khoản có <b>provider API, API key, API secret và base URL riêng</b>. Nếu chọn SePay, API key phải là key lấy từ SePay sau khi liên kết đúng tài khoản ngân hàng. Bank BIN chỉ dùng tạo VietQR, không phải API quét tiền.<br><br><b>Hướng dẫn cấu hình theo nhóm:</b><br>1) Nhập Bot Token và Telegram ID admin trước. 2) Thêm ngân hàng/API ở khối <b>Tài khoản ngân hàng & API nhận tiền</b>. 3) Trong mục <b>Giao hàng cho khách</b>, chọn đơn nhỏ hiện trực tiếp hay mọi đơn đều gửi file. 4) Tick “Ghi ra file .env”. 5) Lưu xong restart bot/web để áp dụng biến môi trường.</div>{bank_panel}<div class="card"><div class="section-head"><div><h2>Cấu hình hệ thống</h2><div class="card-subtitle">Các phần liên quan đã được gom theo nhóm: shop & admin, bot, thanh toán, giao hàng và web admin.</div></div></div><form method="post" action="/settings">{self._form_csrf()}{"".join(groups)}<label style="display:flex;gap:10px;align-items:center;font-weight:800"><input style="width:auto;margin:0" type="checkbox" name="write_env"> Ghi ra file .env để áp dụng sau khi restart bot/web</label><br><button>{tr(self._theme_lang()[0],"save")}</button></form></div>'''
 
     def _bots(self) -> str:
         rows = []

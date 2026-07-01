@@ -600,6 +600,28 @@ class WebSecurityAndWebhookRegressionTest(unittest.TestCase):
         thread.start()
         return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
 
+    def test_admin_settings_exposes_multi_bank_api_fields_and_high_contrast_theme(self) -> None:
+        server, thread, base = self._serve()
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        try:
+            opener.open(base + "/login").read()
+            login = urllib.parse.urlencode({"username": "owner", "password": "StrongPass123"}).encode("utf-8")
+            opener.open(urllib.request.Request(base + "/login", data=login, method="POST"))
+            settings_page = opener.open(base + "/settings").read().decode("utf-8")
+            self.assertIn("Tài khoản ngân hàng & API nhận tiền", settings_page)
+            self.assertIn("Provider API quét giao dịch", settings_page)
+            self.assertIn("API key / Access token", settings_page)
+            self.assertIn("data-bank-preset", settings_page)
+            css = opener.open(base + "/static/style.css").read().decode("utf-8")
+            self.assertIn("--bg:#000000;--bg2:#000000", css)
+            self.assertIn("body{margin:0;background:var(--bg)", css)
+            self.assertIn("html[data-theme=\"light\"] input", css)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_sepay_and_binance_webhook_urls_map_to_internal_payment_providers(self) -> None:
         cat = self.web.create_category("Pay")
         prod = self.web.create_product({"category_id": str(cat), "name": "Item", "currency": "VND", "price": "100000", "cost": "0", "description": "", "warranty_text": ""})
@@ -629,6 +651,53 @@ class WebSecurityAndWebhookRegressionTest(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+
+
+    def test_pay2s_webhook_uses_pay2s_bearer_token_and_confirms_bank_payment(self) -> None:
+        cat = self.web.create_category("Pay2S")
+        prod = self.web.create_product({"category_id": str(cat), "name": "Pay2S Item", "currency": "VND", "price": "100000", "cost": "0", "description": "", "warranty_text": ""})
+        self.web.add_stock(prod, "pay2s-delivery")
+        user_id = UserService(self.db).get_or_create(990011, "pay2s", "Pay2S Buyer")
+        order = OrderService(self.db).create_order(user_id=user_id, product_id=prod, quantity=1)
+        intent = PaymentService(self.db).create_order_payment_intent(order_id=order["id"], provider="bank", expected_user_id=user_id)
+        self.web.create_bank_account({
+            "label": "MB Pay2S",
+            "bank_name": "MB Bank",
+            "bank_bin": "970422",
+            "account_no": "24301999999",
+            "account_name": "PHAM XUAN TOI",
+            "provider": "pay2s",
+            "api_key": "pay2s-token",
+            "api_secret": "pay2s-webhook-token",
+            "is_enabled": "on",
+            "is_default": "on",
+        })
+        server, thread, base = self._serve()
+        try:
+            payload = json.dumps({
+                "transactions": [{
+                    "id": "1788052",
+                    "gateway": "MBB",
+                    "transactionNumber": "FTPAY2S1",
+                    "accountNumber": "24301999999",
+                    "content": f"chuyen tien {intent['public_code']}",
+                    "transferType": "IN",
+                    "transferAmount": 100000,
+                }]
+            }).encode("utf-8")
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(urllib.request.Request(base + "/webhook/pay2s", data=payload, headers={"Content-Type": "application/json", "Authorization": "Bearer wrong"}, method="POST"))
+            self.assertEqual(cm.exception.code, 401)
+            response = urllib.request.urlopen(urllib.request.Request(base + "/webhook/pay2s", data=payload, headers={"Content-Type": "application/json", "Authorization": "Bearer pay2s-webhook-token"}, method="POST"))
+            data = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(data["success"])
+            self.assertEqual(data["results"][0]["status"], "order_delivered")
+            with self.db.connect() as conn:
+                self.assertEqual(conn.execute("SELECT status FROM orders WHERE id=?", (order["id"],)).fetchone()["status"], "delivered")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
 
     def test_native_binance_webhook_signature_and_payload_are_supported(self) -> None:
         cat = self.web.create_category("Binance")

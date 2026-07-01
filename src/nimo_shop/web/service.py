@@ -14,6 +14,7 @@ from typing import Any
 
 from nimo_shop.db import Database, dumps, loads
 from nimo_shop.money import fmt_money, normalize_currency, to_minor
+from nimo_shop.services.bank_accounts import BankAccountService
 from nimo_shop.services.audit import AuditService
 from nimo_shop.services.catalog import CatalogService
 from nimo_shop.services.finance import FinanceService
@@ -1083,6 +1084,26 @@ class AdminWebService:
             lines.append(f"{key}={escaped}\n")
         target.write_text("".join(lines), encoding="utf-8")
         return target
+
+    def list_bank_accounts(self, *, include_disabled: bool = True) -> list[dict]:
+        return BankAccountService(self.db).list_accounts(include_disabled=include_disabled)
+
+    def create_bank_account(self, data: dict[str, str], *, admin_id: int | None = None) -> int:
+        account_id = BankAccountService(self.db).create(data, admin_id=admin_id)
+        self.log(admin_id, "bank_account.create", "bank_account", str(account_id), {"label": data.get("label"), "provider": data.get("provider")})
+        return account_id
+
+    def update_bank_account(self, account_id: int, data: dict[str, str], *, admin_id: int | None = None) -> None:
+        BankAccountService(self.db).update(account_id, data, admin_id=admin_id)
+        self.log(admin_id, "bank_account.update", "bank_account", str(account_id), {"label": data.get("label"), "provider": data.get("provider")})
+
+    def delete_bank_account(self, account_id: int, *, admin_id: int | None = None) -> None:
+        BankAccountService(self.db).delete(account_id, admin_id=admin_id)
+        self.log(admin_id, "bank_account.delete", "bank_account", str(account_id), {})
+
+    def set_default_bank_account(self, account_id: int, *, admin_id: int | None = None) -> None:
+        BankAccountService(self.db).set_default(account_id, admin_id=admin_id)
+        self.log(admin_id, "bank_account.default", "bank_account", str(account_id), {})
 
     def list_preorders(self, status: str | None = None, limit: int = 200) -> list[dict]:
         return PreorderService(self.db).list_preorders(status=status, limit=limit)

@@ -13,6 +13,7 @@ from nimo_shop.bot.keyboards import (
     ADMIN_MENU,
     MAIN_MENU,
     build_reply_keyboard,
+    build_inline_keyboard,
     categories_keyboard,
     language_keyboard,
     main_inline_keyboard,
@@ -31,6 +32,7 @@ from nimo_shop.money import fmt_money, from_minor, to_minor
 from nimo_shop.payments.binance_pay import BinancePayClient, BinancePayConfig
 from nimo_shop.payments.sepay import BankAccount, bank_instruction, vietqr_url
 from nimo_shop.services.audit import AuditService
+from nimo_shop.services.bank_accounts import BankAccountService
 from nimo_shop.services.catalog import CatalogService
 from nimo_shop.services.finance import FinanceService
 from nimo_shop.services.orders import OrderOwnershipError, OrderService, OrderStateError, OutOfStock
@@ -58,6 +60,7 @@ def build_dispatcher(settings: Settings, db: Database):
     payments = PaymentService(db, deposit_expires_minutes=settings.deposit_expires_minutes)
     finance = FinanceService(db)
     audit = AuditService(db)
+    bank_account_service = BankAccountService(db)
     pending_quantity_product_by_tg: dict[int, tuple[int, int, int]] = {}
     pending_preorder_product_by_tg: dict[int, tuple[int, int, int]] = {}
     pending_search_by_tg: set[int] = set()
@@ -72,6 +75,10 @@ def build_dispatcher(settings: Settings, db: Database):
         except Exception:
             pass
         return os.getenv(key, default)
+
+    def app_setting_bool(key: str, default: bool = False) -> bool:
+        value = app_setting(key, "true" if default else "false").strip().lower()
+        return value in {"1", "true", "yes", "on"}
 
 
     async def edit_or_answer_message(message, text: str, *, reply_markup=None) -> None:
@@ -341,12 +348,37 @@ def build_dispatcher(settings: Settings, db: Database):
     async def send_wallet(message: Message, user_id: int) -> None:
         await message.answer(views.wallet(wallet.get_balances(user_id), usdt_network=app_setting("USDT_NETWORK", "BEP20")), reply_markup=wallet_keyboard(), parse_mode="HTML")
 
-    async def send_bank_topup_intent(message: Message, user_id: int, amount_minor: int) -> None:
+    def bank_account_button_rows(prefix: str, payload: str | int) -> list[list[tuple[str, str]]]:
+        accounts = bank_account_service.enabled_accounts()
+        rows: list[list[tuple[str, str]]] = []
+        for account in accounts:
+            label = str(account.get("label") or account.get("bank_name") or account.get("account_no") or "Ngân hàng")
+            text = f"🏦 {label}"
+            if account.get("is_default"):
+                text += " ⭐"
+            rows.append([(text, f"{prefix}:{payload}:{int(account['id'])}")])
+        rows.append([("↩️ Quay lại ví", "wallet:open")])
+        return rows
+
+    async def choose_or_send_bank_topup(message: Message, user_id: int, amount_minor: int) -> None:
+        accounts = bank_account_service.enabled_accounts()
+        if len(accounts) > 1:
+            await message.answer(
+                "🏦 <b>Chọn ngân hàng nhận tiền</b>\n\n"
+                f"Số tiền nạp: <b>{fmt_money(amount_minor, 'VND')}</b>\n"
+                "Sau khi chọn, bot sẽ tạo mã NAP và QR riêng cho tài khoản đó.",
+                reply_markup=build_inline_keyboard(bank_account_button_rows("topupbankacct", amount_minor)),
+                parse_mode="HTML",
+            )
+            return
+        await send_bank_topup_intent(message, user_id, amount_minor)
+
+    async def send_bank_topup_intent(message: Message, user_id: int, amount_minor: int, bank_account_id: int | None = None) -> None:
         if amount_minor <= 0:
             await message.answer("❌ Số tiền nạp phải lớn hơn 0.")
             return
         intent = payments.create_wallet_topup_intent(user_id=user_id, provider="bank", currency="VND", amount_minor=amount_minor)
-        extra, qr = payment_extra_for_bank(intent)
+        extra, qr = payment_extra_for_bank(intent, bank_account_id=bank_account_id)
         await message.answer(
             views.payment_instruction(intent, provider_label="ngân hàng", extra=extra),
             parse_mode="HTML",
@@ -370,13 +402,19 @@ def build_dispatcher(settings: Settings, db: Database):
             return
         # If Binance Pay merchant API is configured, create a real Binance Pay
         # order so webhook confirmation can credit the wallet automatically.
-        if settings.binance_pay_enabled and settings.binance_pay_api_key and settings.binance_pay_secret_key:
+        binance_enabled = app_setting_bool("BINANCE_PAY_ENABLED", settings.binance_pay_enabled)
+        binance_api_key = app_setting("BINANCE_PAY_API_KEY", settings.binance_pay_api_key)
+        binance_secret_key = app_setting("BINANCE_PAY_SECRET_KEY", settings.binance_pay_secret_key)
+        binance_base_url = app_setting("BINANCE_PAY_BASE_URL", settings.binance_pay_base_url)
+        binance_return_url = app_setting("BINANCE_PAY_RETURN_URL", settings.binance_pay_return_url)
+        binance_webhook_url = app_setting("BINANCE_PAY_WEBHOOK_URL", settings.binance_pay_webhook_url)
+        if binance_enabled and binance_api_key and binance_secret_key:
             intent = payments.create_wallet_topup_intent(user_id=user_id, provider="binance_pay", currency="USDT", amount_minor=amount_minor)
             try:
                 client = BinancePayClient(BinancePayConfig(
-                    api_key=settings.binance_pay_api_key,
-                    secret_key=settings.binance_pay_secret_key,
-                    base_url=settings.binance_pay_base_url,
+                    api_key=binance_api_key,
+                    secret_key=binance_secret_key,
+                    base_url=binance_base_url,
                 ))
                 amount = format(from_minor(int(intent["amount_minor"]), intent["currency"]), "f")
                 payload = client.create_order_payload(
@@ -384,8 +422,8 @@ def build_dispatcher(settings: Settings, db: Database):
                     product_name=f"NIMO wallet topup {intent['public_code']}",
                     amount=amount,
                     currency="USDT",
-                    return_url=settings.binance_pay_return_url or None,
-                    webhook_url=settings.binance_pay_webhook_url or None,
+                    return_url=binance_return_url or None,
+                    webhook_url=binance_webhook_url or None,
                 )
                 response = await asyncio.to_thread(client.create_order, payload)
                 data = response.get("data") or {}
@@ -498,7 +536,32 @@ def build_dispatcher(settings: Settings, db: Database):
         except Exception as exc:
             await edit_or_answer_by_id(message, chat_id, message_id, f"❌ Không tạo được đơn đặt trước: <code>{views.h(exc)}</code>")
 
-    def payment_extra_for_bank(intent: dict) -> tuple[str, str | None]:
+    def payment_extra_for_bank(intent: dict, bank_account_id: int | None = None) -> tuple[str, str | None]:
+        account = None
+        if bank_account_id is not None:
+            account = bank_account_service.get(bank_account_id)
+        if not account:
+            account = bank_account_service.default_account()
+        if account:
+            bank = bank_account_service.to_vietqr_bank(account)
+            provider = str(account.get("provider") or "manual").lower()
+            auto_note = "✅ Tự động: SePay/Pay2S đang bật cho tài khoản này." if provider in {"sepay", "pay2s"} and str(account.get("api_key") or "").strip() else "⚠️ QR tạo được, nhưng tài khoản này chưa có API tự quét hợp lệ; admin cần xác nhận nếu tiền không tự vào."
+            instruction = bank_instruction(
+                bank,
+                amount_minor=int(intent["amount_minor"]),
+                currency=intent["currency"],
+                payment_code=intent["public_code"],
+            )
+            qr = vietqr_url(
+                bank,
+                amount_minor=int(intent["amount_minor"]),
+                currency=intent["currency"],
+                add_info=intent["public_code"],
+            )
+            return f"<pre>{views.h(instruction)}</pre>\n{views.h(auto_note)}", qr
+
+        # Backward-compatible single-bank settings. This keeps old installs
+        # running until the owner moves to Web Admin → Tài khoản ngân hàng.
         bank_bin = app_setting("BANK_BIN", settings.bank_bin)
         bank_account = app_setting("BANK_ACCOUNT", settings.bank_account)
         bank_owner = app_setting("BANK_OWNER", settings.bank_owner)
@@ -522,11 +585,8 @@ def build_dispatcher(settings: Settings, db: Database):
                 currency=intent["currency"],
                 add_info=intent["public_code"],
             )
-            # Do not include the VietQR URL in the text body. Telegram sends the
-            # QR as a photo right below; including the URL here made the QR appear
-            # twice and confused customers during bank top-up.
-            return f"<pre>{views.h(instruction)}</pre>", qr
-        return "Admin chưa cấu hình BANK_BIN/BANK_ACCOUNT/BANK_OWNER. Hãy chuyển khoản theo hướng dẫn admin và ghi đúng mã thanh toán.", None
+            return f"<pre>{views.h(instruction)}</pre>\n⚠️ Đang dùng cấu hình ngân hàng cũ. Nên chuyển sang Web Admin → Tài khoản ngân hàng để quản lý nhiều tài khoản/API.", qr
+        return "Admin chưa cấu hình tài khoản ngân hàng nhận tiền. Hãy vào Web Admin → Tài khoản ngân hàng để thêm tài khoản.", None
 
     @router.message(CommandStart())
     async def start(message: Message):
@@ -610,7 +670,7 @@ def build_dispatcher(settings: Settings, db: Database):
             return
         try:
             amount_minor = to_minor(parts[1], "VND")
-            await send_bank_topup_intent(message, user_id, amount_minor)
+            await choose_or_send_bank_topup(message, user_id, amount_minor)
         except Exception as exc:
             await message.answer(f"❌ Số tiền nạp không hợp lệ: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
@@ -694,7 +754,7 @@ def build_dispatcher(settings: Settings, db: Database):
             raw_amount = (message.text or "").strip().replace(",", ".")
             try:
                 if topup_mode == "bank_vnd":
-                    await send_bank_topup_intent(message, user_id, to_minor(raw_amount, "VND"))
+                    await choose_or_send_bank_topup(message, user_id, to_minor(raw_amount, "VND"))
                 elif topup_mode == "binance_usdt":
                     await send_binance_topup_intent(message, user_id, to_minor(raw_amount, "USDT"))
                 elif topup_mode == "usdt_bep20":
@@ -1133,28 +1193,50 @@ def build_dispatcher(settings: Settings, db: Database):
             await edit_or_answer_callback(callback, f"❌ Không thanh toán được: <code>{views.h(exc)}</code>")
         await callback.answer()
 
+    async def send_order_bank_payment(callback: CallbackQuery, user_id: int, order_id: int, bank_account_id: int | None = None) -> None:
+        intent = payments.create_order_payment_intent(order_id=order_id, provider="bank", expected_user_id=user_id)
+        extra, qr = payment_extra_for_bank(intent, bank_account_id=bank_account_id)
+        await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="ngân hàng", extra=extra))
+        if qr:
+            try:
+                await callback.message.answer_photo(
+                    qr,
+                    caption=(
+                        f"🏦 QR chuyển khoản {views.h(intent['public_code'])}\n"
+                        f"Nội dung chuyển khoản bắt buộc: <code>{views.h(intent['public_code'])}</code>"
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as qr_exc:
+                await callback.message.answer(f"⚠️ Không gửi được QR ngân hàng: <code>{views.h(qr_exc)}</code>", parse_mode="HTML")
+
     @router.callback_query(F.data.startswith("paybank:"))
     async def cb_pay_bank(callback: CallbackQuery):
         user_id = ensure_user_from_callback(callback)
         order_id = int(callback.data.split(":", 1)[1])
         try:
-            intent = payments.create_order_payment_intent(order_id=order_id, provider="bank", expected_user_id=user_id)
-            extra, qr = payment_extra_for_bank(intent)
-            await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="ngân hàng", extra=extra))
-            if qr:
-                try:
-                    await callback.message.answer_photo(
-                        qr,
-                        caption=(
-                            f"🏦 QR chuyển khoản {views.h(intent['public_code'])}\n"
-                            f"Nội dung chuyển khoản bắt buộc: <code>{views.h(intent['public_code'])}</code>"
-                        ),
-                        parse_mode="HTML",
-                    )
-                except Exception as qr_exc:
-                    await callback.message.answer(f"⚠️ Không gửi được QR ngân hàng: <code>{views.h(qr_exc)}</code>", parse_mode="HTML")
+            accounts = bank_account_service.enabled_accounts()
+            if len(accounts) > 1:
+                await edit_or_answer_callback(
+                    callback,
+                    "🏦 <b>Chọn ngân hàng chuyển khoản</b>\n\n"
+                    "Sau khi chọn, bot sẽ tạo mã ORD và QR riêng cho ngân hàng đó.",
+                    reply_markup=build_inline_keyboard(bank_account_button_rows("paybankacct", order_id)),
+                )
+            else:
+                await send_order_bank_payment(callback, user_id, order_id)
         except Exception as exc:
             await edit_or_answer_callback(callback, f"❌ Không tạo được thanh toán: <code>{views.h(exc)}</code>")
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("paybankacct:"))
+    async def cb_pay_bank_account(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        try:
+            _, order_id_raw, account_id_raw = str(callback.data).split(":", 2)
+            await send_order_bank_payment(callback, user_id, int(order_id_raw), int(account_id_raw))
+        except Exception as exc:
+            await edit_or_answer_callback(callback, f"❌ Không tạo được thanh toán ngân hàng: <code>{views.h(exc)}</code>")
         await callback.answer()
 
     @router.callback_query(F.data.startswith("paybinance:"))
@@ -1165,11 +1247,17 @@ def build_dispatcher(settings: Settings, db: Database):
             intent = payments.create_order_payment_intent(order_id=order_id, provider="binance_pay", expected_user_id=user_id)
             order = orders.get_order(order_id)
             extra = ""
-            if settings.binance_pay_enabled and settings.binance_pay_api_key and settings.binance_pay_secret_key:
+            binance_enabled = app_setting_bool("BINANCE_PAY_ENABLED", settings.binance_pay_enabled)
+            binance_api_key = app_setting("BINANCE_PAY_API_KEY", settings.binance_pay_api_key)
+            binance_secret_key = app_setting("BINANCE_PAY_SECRET_KEY", settings.binance_pay_secret_key)
+            binance_base_url = app_setting("BINANCE_PAY_BASE_URL", settings.binance_pay_base_url)
+            binance_return_url = app_setting("BINANCE_PAY_RETURN_URL", settings.binance_pay_return_url)
+            binance_webhook_url = app_setting("BINANCE_PAY_WEBHOOK_URL", settings.binance_pay_webhook_url)
+            if binance_enabled and binance_api_key and binance_secret_key:
                 client = BinancePayClient(BinancePayConfig(
-                    api_key=settings.binance_pay_api_key,
-                    secret_key=settings.binance_pay_secret_key,
-                    base_url=settings.binance_pay_base_url,
+                    api_key=binance_api_key,
+                    secret_key=binance_secret_key,
+                    base_url=binance_base_url,
                 ))
                 amount = format(from_minor(int(intent["amount_minor"]), intent["currency"]), "f")
                 payload = client.create_order_payload(
@@ -1177,8 +1265,8 @@ def build_dispatcher(settings: Settings, db: Database):
                     product_name=order["product_name"],
                     amount=amount,
                     currency=intent["currency"],
-                    return_url=settings.binance_pay_return_url or None,
-                    webhook_url=settings.binance_pay_webhook_url or None,
+                    return_url=binance_return_url or None,
+                    webhook_url=binance_webhook_url or None,
                 )
                 response = await asyncio.to_thread(client.create_order, payload)
                 data = response.get("data") or {}
@@ -1252,6 +1340,16 @@ def build_dispatcher(settings: Settings, db: Database):
             "Ví dụ: <code>100000</code>\n\n"
             "Bot sẽ tạo mã chuyển khoản riêng và QR ngân hàng cho đúng số tiền bạn nhập.",
         )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("topupbankacct:"))
+    async def cb_topup_bank_account(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        try:
+            _, amount_raw, account_id_raw = str(callback.data).split(":", 2)
+            await send_bank_topup_intent(callback.message, user_id, int(amount_raw), int(account_id_raw))
+        except Exception as exc:
+            await edit_or_answer_callback(callback, f"❌ Không tạo được mã nạp ngân hàng: <code>{views.h(exc)}</code>")
         await callback.answer()
 
     @router.callback_query(F.data == "topup:binance")
