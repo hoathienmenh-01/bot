@@ -143,6 +143,15 @@ CREATE TABLE IF NOT EXISTS low_stock_alerts (
     FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS buyer_api_idempotency (
+    user_id INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    response_json TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id, idempotency_key),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 """
 
 DEFAULT_SETTING_KEYS: dict[str, tuple[str, int]] = {
@@ -152,7 +161,7 @@ DEFAULT_SETTING_KEYS: dict[str, tuple[str, int]] = {
     "BOT_TOKEN": ("", 1),
     "DATABASE_PATH": ("data/shop.db", 0),
     "DEPOSIT_EXPIRES_MINUTES": ("15", 0),
-    "ORDER_EXPIRES_MINUTES": ("20", 0),
+    "ORDER_EXPIRES_MINUTES": ("15", 0),
     "BANK_ENABLED": ("false", 0),
     "SEPAY_API_KEY": ("", 1),
     "SEPAY_POLL_SECONDS": ("30", 0),
@@ -166,6 +175,10 @@ DEFAULT_SETTING_KEYS: dict[str, tuple[str, int]] = {
     "BINANCE_PAY_BASE_URL": ("https://bpay.binanceapi.com", 0),
     "BINANCE_PAY_RETURN_URL": ("", 0),
     "BINANCE_PAY_WEBHOOK_URL": ("", 0),
+    "BINANCE_PAY_ID": ("", 0),
+    "BINANCE_PAY_NOTE": ("", 0),
+    "USDT_BEP20_ADDRESS": ("", 0),
+    "USDT_BEP20_TOLERANCE": ("0.02", 0),
     "WEB_ADMIN_USERNAME": ("admin", 0),
     "WEB_ADMIN_PASSWORD": ("", 1),
     "WEB_SESSION_SECRET": ("", 1),
@@ -183,6 +196,7 @@ DEFAULT_SETTING_KEYS: dict[str, tuple[str, int]] = {
     "PREORDER_DEPOSIT_PERCENT": ("10", 0),
     "STOCK_DUPLICATE_POLICY": ("allow", 0),
     "API_PUBLIC_BASE_URL": ("http://127.0.0.1:8080", 0),
+    "WEBHOOK_SHARED_SECRET": ("", 1),
 }
 
 
@@ -211,7 +225,9 @@ class AdminWebService:
                 )
             row = conn.execute("SELECT COUNT(*) AS c FROM admin_accounts WHERE is_active=1").fetchone()
             if int(row["c"]) == 0:
-                password = bootstrap_password or os.getenv("WEB_ADMIN_PASSWORD") or "admin12345"
+                password = bootstrap_password or os.getenv("WEB_ADMIN_PASSWORD")
+                if not password or password == "admin12345":
+                    raise ValueError("WEB_ADMIN_PASSWORD/--password is required and must not be the old default admin12345")
                 conn.execute(
                     "INSERT INTO admin_accounts(username, password_hash, role) VALUES(?,?, 'owner')",
                     (bootstrap_username or os.getenv("WEB_ADMIN_USERNAME") or "admin", hash_password(password)),
@@ -449,9 +465,10 @@ class AdminWebService:
         product = self.get_product(product_id)
         rel = str(product.get("product_image_path") or "")
         if rel:
-            path = self.project_root / rel
+            path = (self.project_root / rel).resolve()
+            media_root = (self.project_root / "media" / "products").resolve()
             try:
-                if path.exists() and path.is_file():
+                if path.is_relative_to(media_root) and path.exists() and path.is_file():
                     path.unlink()
             except OSError:
                 pass
@@ -706,6 +723,14 @@ class AdminWebService:
         value = str(settings.get("STOCK_DUPLICATE_POLICY", {"value": os.getenv("STOCK_DUPLICATE_POLICY", "allow")}).get("value") or "allow").strip().lower()
         return value if value in {"allow", "skip", "reject"} else "allow"
 
+    def order_expires_minutes(self) -> int:
+        settings = self.get_settings()
+        raw = settings.get("ORDER_EXPIRES_MINUTES", {"value": os.getenv("ORDER_EXPIRES_MINUTES", "15")}).get("value")
+        try:
+            return max(1, int(raw or 15))
+        except (TypeError, ValueError):
+            return 15
+
     def add_stock(self, product_id: int, raw_lines: str, *, admin_id: int | None = None, parser_mode: str = "product") -> int:
         parser_mode, custom_labels = self._resolve_stock_parser(product_id, parser_mode)
         parsed = self.parse_stock_text(raw_lines, parser_mode=parser_mode, custom_labels=custom_labels)
@@ -716,6 +741,44 @@ class AdminWebService:
             sample = ", ".join(self.mask_stock_line(str(x), str(parsed.get("detected") or "raw"), custom_labels=custom_labels) for x in list(duplicates)[:3])
             raise ValueError(f"Dữ liệu nhập có dòng trùng. Hãy xóa/sửa dòng trùng rồi nhập lại. Ví dụ: {sample}")
         inserted = CatalogService(self.db).add_stock(product_id, list(lines), duplicate_policy=policy)
+        if inserted > 0:
+            product = self.get_product(product_id) or {"name": f"#{product_id}", "price_minor": 0, "currency": "VND"}
+            NotificationService(self.db).queue_product_update(
+                product_id=product_id,
+                title="Hàng mới đã về",
+                message=(
+                    f"📦 <b>Hàng mới đã về</b>\n\n"
+                    f"Sản phẩm: <b>{str(product.get('name') or product_id)}</b>\n"
+                    f"Số lượng vừa nhập: <b>{inserted}</b>\n\n"
+                    "Bấm /start để vào shop và mua ngay."
+                ),
+            )
+            created_orders = PreorderService(self.db, order_expires_minutes=self.order_expires_minutes()).create_payment_orders_for_available_stock(product_id)
+            notifier = NotificationService(self.db)
+            for order in created_orders:
+                remaining = int(order.get("total_amount_minor") or 0)
+                if str(order.get("status")) == "delivered" or remaining == 0:
+                    msg = (
+                        f"✅ <b>Sản phẩm đặt trước đã được giao</b>\n\n"
+                        f"Mã đặt trước: <code>{order.get('preorder_code')}</code>\n"
+                        f"Đơn hàng: <code>{order.get('public_code')}</code>\n"
+                        f"Sản phẩm: <b>{order.get('product_name')}</b>\n"
+                        f"Số lượng: <b>{int(order.get('quantity') or 0)}</b>\n"
+                        "Bạn có thể vào Lịch sử mua để xem/tải lại thông tin hàng."
+                    )
+                    notifier.queue_user_message(user_id=int(order["user_id"]), kind="preorder_delivered", title="Đặt trước đã giao hàng", message=msg, product_id=product_id)
+                else:
+                    msg = (
+                        f"📦 <b>Sản phẩm đặt trước đã có hàng</b>\n\n"
+                        f"Mã đặt trước: <code>{order.get('preorder_code')}</code>\n"
+                        f"Đơn thanh toán phần còn lại: <code>{order.get('public_code')}</code>\n"
+                        f"Sản phẩm: <b>{order.get('product_name')}</b>\n"
+                        f"Số lượng: <b>{int(order.get('quantity') or 0)}</b>\n"
+                        f"Đã cọc: <b>{fmt_money(int(order.get('deposit_amount_minor') or 0), order.get('currency') or 'VND')}</b>\n"
+                        f"Còn cần thanh toán: <b>{fmt_money(remaining, order.get('currency') or 'VND')}</b>\n\n"
+                        "Vào Lịch sử mua hoặc liên hệ admin nếu cần hỗ trợ."
+                    )
+                    notifier.queue_user_message(user_id=int(order["user_id"]), kind="preorder_ready", title="Đặt trước đã có hàng", message=msg, product_id=product_id)
         self.log(admin_id, "stock.import", "product", str(product_id), {"submitted": int(parsed["count"]), "inserted": inserted, "detected": parsed.get("detected"), "parser_mode": parser_mode, "duplicate_policy": policy})
         return inserted
 
@@ -764,12 +827,41 @@ class AdminWebService:
         with self.db.connect() as conn:
             return [dict(r) for r in conn.execute(sql, params)]
 
+    def _queue_order_notice(self, order_id: int, *, kind: str, title: str, message: str) -> None:
+        try:
+            with self.db.connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT o.*, p.name AS product_name
+                      FROM orders o JOIN products p ON p.id=o.product_id
+                     WHERE o.id=?
+                    """,
+                    (order_id,),
+                ).fetchone()
+            if row:
+                NotificationService(self.db).queue_user_message(
+                    user_id=int(row["user_id"]),
+                    kind=kind,
+                    title=title,
+                    message=message.format(**dict(row)),
+                    product_id=int(row["product_id"]),
+                )
+        except Exception as exc:
+            # Admin action must not fail only because Telegram notification queue failed,
+            # but the failure must be auditable in a commercial shop.
+            try:
+                self.log(None, "notification.queue_failed", "order", str(order_id), {"kind": kind, "error": str(exc)})
+            except Exception:
+                pass
+
     def cancel_order(self, order_id: int, *, admin_id: int | None = None) -> None:
+        self._queue_order_notice(order_id, kind="order_cancelled", title="Đơn hàng đã hủy", message="❌ <b>Đơn hàng {public_code} đã bị hủy bởi admin</b>\n\nSản phẩm: <b>{product_name}</b>\nNếu cần hỗ trợ, vui lòng liên hệ shop.")
         OrderService(self.db).cancel_order(order_id, reason="admin_web_cancel")
         self.log(admin_id, "order.cancel", "order", str(order_id), {})
 
     def refund_order(self, order_id: int, *, admin_id: int | None = None) -> dict:
         result = OrderService(self.db).refund_to_wallet(order_id, reason="admin_web_refund")
+        self._queue_order_notice(order_id, kind="order_refunded", title="Đơn hàng đã hoàn tiền", message="💰 <b>Đơn hàng {public_code} đã được hoàn tiền</b>\n\nSản phẩm: <b>{product_name}</b>\nTiền đã hoàn vào ví của bạn.")
         self.log(admin_id, "order.refund", "order", str(order_id), {})
         return result
 
@@ -864,6 +956,13 @@ class AdminWebService:
             description=f"manual web confirm {payment_code}",
             raw={"source": "web_admin", "admin_id": admin_id},
         )
+        if result.get("intent", {}).get("order_id"):
+            oid = int(result["intent"]["order_id"])
+            status = str(result.get("status") or "")
+            if status == "order_delivered":
+                self._queue_order_notice(oid, kind="order_delivered", title="Đơn hàng đã giao", message="✅ <b>Đơn hàng {public_code} đã được xác nhận thanh toán và giao hàng</b>\n\nSản phẩm: <b>{product_name}</b>\nVào bot để xem/tải lại thông tin hàng nếu cần.")
+            else:
+                self._queue_order_notice(oid, kind="payment_update", title="Cập nhật thanh toán", message="💳 <b>Thanh toán đơn {public_code} đã được cập nhật</b>\n\nSản phẩm: <b>{product_name}</b>\nTrạng thái mới: " + status)
         self.log(admin_id, "payment.confirm", "payment_code", payment_code, {"provider": provider, "tx_id": tx_id, "amount": amount, "currency": currency, "result": result.get("status")})
         return result
 
@@ -924,13 +1023,37 @@ class AdminWebService:
     def list_preorders(self, status: str | None = None, limit: int = 200) -> list[dict]:
         return PreorderService(self.db).list_preorders(status=status, limit=limit)
 
-    def cancel_preorder(self, preorder_id: int, *, admin_id: int | None = None) -> None:
-        PreorderService(self.db).cancel_preorder(preorder_id)
-        self.log(admin_id, "preorder.cancel", "preorder", str(preorder_id), {})
+    def cancel_preorder(self, preorder_id: int, *, admin_id: int | None = None) -> dict:
+        result = PreorderService(self.db, order_expires_minutes=self.order_expires_minutes()).cancel_preorder(preorder_id)
+        preorder = result.get("preorder") or {}
+        if preorder.get("user_id"):
+            refunded = int(result.get("refunded_minor") or 0)
+            if refunded > 0:
+                msg = f"💰 <b>Đặt trước {preorder.get('public_code')} đã hủy và hoàn cọc</b>\n\nSố tiền hoàn vào ví: <b>{fmt_money(refunded, preorder.get('currency') or 'VND')}</b>."
+                kind = "preorder_refunded"
+                title = "Đặt trước đã hoàn cọc"
+            else:
+                msg = f"❌ <b>Đặt trước {preorder.get('public_code')} đã bị hủy</b>."
+                kind = "preorder_cancelled"
+                title = "Đặt trước đã hủy"
+            NotificationService(self.db).queue_user_message(user_id=int(preorder["user_id"]), kind=kind, title=title, message=msg, product_id=int(preorder["product_id"]))
+        self.log(admin_id, "preorder.cancel", "preorder", str(preorder_id), {"refunded_minor": result.get("refunded_minor")})
+        return result
 
-    def fulfill_preorder(self, preorder_id: int, *, admin_id: int | None = None) -> None:
-        PreorderService(self.db).mark_fulfilled(preorder_id)
-        self.log(admin_id, "preorder.fulfill", "preorder", str(preorder_id), {})
+    def fulfill_preorder(self, preorder_id: int, *, admin_id: int | None = None) -> dict:
+        order = PreorderService(self.db, order_expires_minutes=self.order_expires_minutes()).mark_fulfilled(preorder_id)
+        remaining = int(order.get("total_amount_minor") or 0)
+        if str(order.get("status")) == "delivered" or remaining == 0:
+            msg = f"✅ <b>Đặt trước {order.get('preorder_code')} đã được giao</b>\n\nĐơn hàng: <code>{order.get('public_code')}</code>. Vào Lịch sử mua để xem/tải lại hàng."
+            kind = "preorder_delivered"
+            title = "Đặt trước đã giao hàng"
+        else:
+            msg = f"📦 <b>Đặt trước {order.get('preorder_code')} đã có hàng</b>\n\nĐơn thanh toán phần còn lại: <code>{order.get('public_code')}</code>\nCòn cần thanh toán: <b>{fmt_money(remaining, order.get('currency') or 'VND')}</b>."
+            kind = "preorder_ready"
+            title = "Đặt trước đã có hàng"
+        NotificationService(self.db).queue_user_message(user_id=int(order["user_id"]), kind=kind, title=title, message=msg, product_id=int(order["product_id"]))
+        self.log(admin_id, "preorder.fulfill", "preorder", str(preorder_id), {"order_id": order.get("id"), "order_status": order.get("status")})
+        return order
 
     def search_products(self, query: str, limit: int = 50) -> list[dict]:
         return CatalogService(self.db).search_products(query, limit=limit)
@@ -1038,7 +1161,7 @@ class AdminWebService:
             rows.append({"name": file.name, "path": str(file), "size": file.stat().st_size, "created_at": datetime.fromtimestamp(file.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")})
         return rows
 
-    def create_backup(self, *, include_env: bool = True, admin_id: int | None = None) -> Path:
+    def create_backup(self, *, include_env: bool = False, admin_id: int | None = None) -> Path:
         backup_dir = self.project_root / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1081,7 +1204,7 @@ class AdminWebService:
             names = set(zf.namelist())
             if "data/shop.db" not in names:
                 raise ValueError("Backup không chứa data/shop.db")
-            safety = self.create_backup(include_env=True, admin_id=admin_id)
+            safety = self.create_backup(include_env=False, admin_id=admin_id)
             db_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = db_path.with_suffix(".restore-tmp")
             with zf.open("data/shop.db") as src, tmp.open("wb") as dst:
@@ -1090,9 +1213,12 @@ class AdminWebService:
             if ".env" in names:
                 with zf.open(".env") as src, (self.project_root / ".env").open("wb") as dst:
                     shutil.copyfileobj(src, dst)
+            media_root = (self.project_root / "media" / "products").resolve()
             for name in names:
                 if name.startswith("media/products/") and not name.endswith("/"):
-                    target = self.project_root / name
+                    target = (self.project_root / name).resolve()
+                    if not target.is_relative_to(media_root):
+                        raise ValueError(f"Backup chứa đường dẫn media không an toàn: {name}")
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with zf.open(name) as src, target.open("wb") as dst:
                         shutil.copyfileobj(src, dst)
@@ -1253,7 +1379,12 @@ class AdminWebService:
 
     def mark_payment_event_reviewed(self, event_id: int, note: str = "", *, admin_id: int | None = None) -> None:
         with self.db.transaction() as conn:
-            row = conn.execute("UPDATE external_payment_events SET status='reviewed', raw_json=? WHERE id=?", (dumps({'admin_note': note}), event_id)).rowcount
+            current = conn.execute("SELECT raw_json FROM external_payment_events WHERE id=?", (event_id,)).fetchone()
+            if not current:
+                raise ValueError("Không tìm thấy giao dịch")
+            raw = loads(current["raw_json"])
+            raw["admin_note"] = note
+            row = conn.execute("UPDATE external_payment_events SET status='reviewed', raw_json=? WHERE id=?", (dumps(raw), event_id)).rowcount
             if row == 0:
                 raise ValueError("Không tìm thấy giao dịch")
         self.log(admin_id, "payment.review", "external_payment_event", str(event_id), {"note": note})

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 from pathlib import Path
 
 from nimo_shop.bot.app import build_dispatcher
@@ -42,7 +43,7 @@ async def notification_send_loop(bot, db: Database) -> None:
         try:
             pending = await asyncio.to_thread(service.pending, 5)
             for item in pending:
-                recipients = await asyncio.to_thread(service.recipients, 5000)
+                recipients = await asyncio.to_thread(service.recipients, item, 5000)
                 sent = 0
                 for telegram_id in recipients:
                     try:
@@ -51,9 +52,13 @@ async def notification_send_loop(bot, db: Database) -> None:
                         await asyncio.sleep(0.05)
                     except Exception as exc:  # pragma: no cover - per-user runtime failure
                         print(f"[notify] cannot send to {telegram_id}: {exc}")
-                await asyncio.to_thread(service.mark_sent, int(item["id"]), sent)
-                if sent:
+                if sent > 0:
+                    await asyncio.to_thread(service.mark_sent, int(item["id"]), sent)
                     print(f"[notify] sent notification #{item['id']} to {sent} user(s)")
+                else:
+                    error = "no active recipient" if not recipients else "all recipient sends failed"
+                    await asyncio.to_thread(service.mark_failed, int(item["id"]), error)
+                    print(f"[notify] failed notification #{item['id']}: {error}")
         except Exception as exc:  # pragma: no cover - runtime logging only
             print(f"[notify] loop error: {exc}")
         await asyncio.sleep(15)
@@ -71,6 +76,30 @@ async def sepay_poll_loop(settings: Settings, payments: PaymentService) -> None:
             print(f"[sepay] polling error: {exc}")
         await asyncio.sleep(max(10, int(settings.sepay_poll_seconds)))
 
+
+
+async def expired_order_notify_loop(bot, db: Database, settings: Settings) -> None:
+    orders = __import__("nimo_shop.services.orders", fromlist=["OrderService"]).OrderService(db, settings.order_expires_minutes)
+    while True:
+        try:
+            expired = await asyncio.to_thread(orders.sweep_expired_details)
+            for order in expired:
+                try:
+                    await bot.send_message(
+                        order["telegram_id"],
+                        f"⏰ <b>Đơn hàng {order['public_code']} đã hết hạn</b>\n\n"
+                        f"Sản phẩm: <b>{order['product_name']}</b>\n"
+                        "Đơn chưa thanh toán đúng hạn nên đã tự hủy và hàng giữ tạm đã trả về kho.\n"
+                        "Bấm /start để tạo đơn mới nếu bạn vẫn muốn mua.",
+                        parse_mode="HTML",
+                    )
+                except Exception as exc:  # pragma: no cover
+                    print(f"[expired] cannot notify user {order.get('telegram_id')}: {exc}")
+            if expired:
+                print(f"[expired] cancelled and notified {len(expired)} order(s)")
+        except Exception as exc:  # pragma: no cover
+            print(f"[expired] loop error: {exc}")
+        await asyncio.sleep(30)
 
 
 async def set_default_bot_commands(bot) -> None:
@@ -103,11 +132,13 @@ def run_setup_web(settings: Settings, *, reason: str) -> None:
         port = int(os.getenv("WEB_PORT", str(port)))
         username = os.getenv("WEB_ADMIN_USERNAME", "admin")
         password = os.getenv("WEB_ADMIN_PASSWORD") or None
-        session_secret = os.getenv("WEB_SESSION_SECRET")
+        session_secret = os.getenv("WEB_SESSION_SECRET") or secrets.token_urlsafe(32)
+        if not password:
+            password = secrets.token_urlsafe(12)
     except Exception:
         username = "admin"
-        password = None
-        session_secret = None
+        password = secrets.token_urlsafe(12)
+        session_secret = secrets.token_urlsafe(32)
 
     server = create_server(
         str(settings.database_path),
@@ -122,7 +153,8 @@ def run_setup_web(settings: Settings, *, reason: str) -> None:
     print(f"Lý do: {reason}")
     print(f"Web Admin Setup đang chạy tại: http://127.0.0.1:{port}")
     print(f"Nếu mở từ máy khác cùng WiFi: http://<IP_MAY_NAY>:{port}")
-    print("Đăng nhập mặc định: admin / admin12345 nếu chưa đặt WEB_ADMIN_PASSWORD.")
+    print(f"Tài khoản setup: {username} / {password}")
+    print("Hãy đổi mật khẩu và lưu WEB_SESSION_SECRET/WEB_ADMIN_PASSWORD vào .env trước khi mở public.")
     print("Vào Cấu hình → nhập BOT_TOKEN/ADMIN_IDS/Bank/SePay/Binance → tick 'Ghi ra .env' → Lưu → restart lệnh này.\n")
     server.serve_forever()
 
@@ -166,6 +198,7 @@ async def amain(*, setup_web_on_invalid_token: bool = True) -> None:
     if settings.bank_enabled and settings.sepay_api_key:
         background_tasks.append(asyncio.create_task(sepay_poll_loop(settings, PaymentService(db, settings.deposit_expires_minutes))))
     background_tasks.append(asyncio.create_task(notification_send_loop(bot, db)))
+    background_tasks.append(asyncio.create_task(expired_order_notify_loop(bot, db, settings)))
     try:
         print("NIMO Telegram bot đang chạy. Web admin có thể chạy ở terminal khác bằng: PYTHONPATH=src python -m nimo_shop.web.main --host 0.0.0.0 --port 8080")
         await dp.start_polling(bot)

@@ -4,12 +4,10 @@ from nimo_shop.db import Database
 
 
 class NotificationService:
-    """Queue and send bot-facing admin notifications.
+    """Queue Telegram notifications for the bot process to deliver.
 
-    Web Admin and Telegram bot usually run in separate processes. Web actions
-    therefore create rows in bot_notifications; the bot process polls/sends
-    those rows when it is online. This avoids trying to send Telegram messages
-    directly from a web request.
+    target_user_id = NULL means broadcast to every non-banned user.
+    target_user_id set means send only to that buyer.
     """
 
     def __init__(self, db: Database) -> None:
@@ -21,10 +19,23 @@ class NotificationService:
         with self.db.transaction() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO bot_notifications(kind, title, message, product_id)
-                VALUES('product_update', ?, ?, ?)
+                INSERT INTO bot_notifications(kind, title, message, product_id, target_user_id)
+                VALUES('product_update', ?, ?, ?, NULL)
                 """,
                 (title.strip(), message.strip(), product_id),
+            )
+            return int(cur.lastrowid)
+
+    def queue_user_message(self, *, user_id: int, kind: str, title: str, message: str, product_id: int | None = None) -> int:
+        if not title.strip() or not message.strip():
+            raise ValueError("notification title/message is required")
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO bot_notifications(kind, title, message, product_id, target_user_id)
+                VALUES(?,?,?,?,?)
+                """,
+                ((kind or "user_message").strip(), title.strip(), message.strip(), product_id, user_id),
             )
             return int(cur.lastrowid)
 
@@ -52,8 +63,12 @@ class NotificationService:
                 (error[:500], notification_id),
             )
 
-    def recipients(self, limit: int = 5000) -> list[str]:
+    def recipients(self, notification: dict | None = None, limit: int = 5000) -> list[str]:
+        target_user_id = int((notification or {}).get("target_user_id") or 0)
         with self.db.connect() as conn:
+            if target_user_id:
+                row = conn.execute("SELECT telegram_id FROM users WHERE id=? AND is_banned=0", (target_user_id,)).fetchone()
+                return [str(row["telegram_id"])] if row else []
             return [
                 str(r["telegram_id"])
                 for r in conn.execute(

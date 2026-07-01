@@ -119,9 +119,10 @@ def product_detail_keyboard(product_id: int, available_stock: int):
 
 def order_payment_keyboard(order_id: int):
     return build_inline_keyboard([
-        [("💰 Thanh toán bằng ví", f"paywallet:{order_id}")],
-        [("➕ Nạp ví", "wallet:open"), ("🏦 Chuyển khoản ngân hàng", f"paybank:{order_id}")],
-        [("🟡 Binance Pay/USDT", f"paybinance:{order_id}")],
+        [("💰 Pay with Wallet", f"paywallet:{order_id}")],
+        [("🏦 Pay with Bank QR", f"paybank:{order_id}")],
+        [("🟡 Pay with Binance", f"paybinance:{order_id}")],
+        [("🌕 Pay with USDT (BEP20)", f"payusdt:{order_id}")],
         [("❌ Hủy đơn", f"cancel:{order_id}")],
     ])
 
@@ -135,9 +136,11 @@ def preorder_payment_keyboard(preorder_id: int):
 
 
 def wallet_keyboard_rows() -> list[list[tuple[str, str]]]:
-    rows = [[(f"➕ Nạp {amount:,}đ".replace(",", "."), f"topupbank:{amount}")] for amount in TOPUP_AMOUNTS_VND]
+    rows = [[(f"🏦 Nạp ngân hàng {amount:,}đ".replace(",", "."), f"topupbank:{amount}")] for amount in TOPUP_AMOUNTS_VND]
+    rows.append([("🟡 Top up with Binance", "topupbinance:custom")])
+    rows.append([("🌕 Top up USDT (BEP20)", "topupusdt:custom")])
     rows.append([("✍️ Nạp số tiền khác", "topupcustom")])
-    rows.append([("📜 Lịch sử mua", "history"), ("🏠 Menu", "menu:main")])
+    rows.append([("🔄 Làm mới số dư", "wallet:open"), ("🏠 Menu", "menu:main")])
     return rows
 
 

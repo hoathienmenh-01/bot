@@ -1,3 +1,43 @@
+# CHANGELOG
+
+## v2.8.1 - Commercial hardening production fix
+
+- Webhooks now require `WEBHOOK_SHARED_SECRET`/HMAC; unsigned SePay/Binance webhook requests are rejected instead of accepted silently.
+- Web Admin no longer falls back to `admin/admin12345` or a fixed session secret. Public Web Admin requires a strong `WEB_SESSION_SECRET`.
+- Payment/order/preorder public codes now use larger random suffixes while keeping legacy 8-hex payment codes reconcilable.
+- Reconciliation can now apply an earlier unmatched real transaction with the same `provider_tx_id` after admin supplies the correct payment code.
+- Paid preorder cancellation refunds the deposit to the buyer wallet exactly once.
+- Full-deposit preorders are delivered automatically when stock arrives; Web Admin fulfill no longer marks a preorder fulfilled without creating/delivering an order.
+- Backup restore blocks `media/products` path traversal and backup download defaults to excluding `.env`.
+- Buyer API now supports idempotency keys and uses configured order expiry.
+- Bot admin commands now queue customer notifications for confirm/cancel/refund and stock-import preorder handling.
+- Added commercial regression suite. Full test suite: 81 tests passing, compileall OK.
+
+## v2.8.0 - Commercial checkout, preorder fulfillment and admin notifications
+
+- Split checkout into Wallet, Bank QR, Binance and USDT BEP20 actions.
+- Added Binance ID fallback instructions and USDT BEP20 payment instructions with QR image URL support.
+- Added `/napusdt` and wallet top-up choices for Binance/USDT.
+- Changed default order expiry to 15 minutes and added a background expired-order notifier that cancels stale orders and informs buyers.
+- Fixed zero-price/test products: wallet payment no longer crashes with `debit amount must be > 0`; free orders deliver safely.
+- Web Admin stock import now queues a broadcast when new stock is added so customers know to return and buy.
+- Active preorders are now matched FIFO when stock arrives; the system creates a remaining-payment order and notifies the buyer.
+- Admin order cancel/refund/manual payment confirmation now queues targeted buyer notifications.
+- Delivery messages include a copy-friendly `<pre>` block for small orders while keeping TXT file delivery for large orders.
+- Web Admin sidebar is grouped into operational sections: Overview, Sales, Products & Stock, Payments & Wallets, Customers/API and System.
+- Added settings for `BINANCE_PAY_ID`, `BINANCE_PAY_NOTE`, `USDT_BEP20_ADDRESS`, `USDT_BEP20_TOLERANCE`.
+- Added regression tests for zero-price delivery, stock broadcast and preorder auto-order creation.
+- Full test suite: 75 tests passing, compileall OK, seed demo OK, audit OK.
+
+## v2.7.0 - Unified payments and commercial hardening
+
+- Confirmed the shop can run bank/VietQR/SePay, Binance Pay/USDT and wallet payments inside one Telegram bot; no separate payment bot is required.
+- Fixed webhook provider mapping: `/webhook/sepay` now reconciles `bank` payment intents and `/webhook/binance` reconciles `binance_pay` intents. Earlier versions could persist valid webhook payments as unmatched because the public URL provider name did not match the internal intent provider.
+- Hardened order payment intent creation: repeatedly pressing the same payment method for one pending order now reuses the existing live payment code instead of generating multiple confusing ORD codes.
+- Enforced Web Admin role permissions. Roles were previously stored but not enforced; non-owner accounts can no longer access owner-only pages or post owner-only actions.
+- Added regression tests for webhook mapping, pending payment-code reuse, and role permission enforcement, and optional shared-secret/HMAC webhook protection.
+- Full test suite: 73 tests passing, compileall OK, seed demo OK, audit OK.
+
 # Changelog
 
 ## v2.6.0 - Telegram Menu / Buyer API / Catalog Grid / Duplicate Stock Policy

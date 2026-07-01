@@ -219,6 +219,40 @@ def payment_instruction(intent: dict, *, provider_label: str, extra: str = "") -
     ).strip()
 
 
+
+
+def binance_id_instruction(intent: dict, *, binance_id: str, note: str = "") -> str:
+    memo = note.strip() or "Gửi đúng số tiền, sau đó gửi ID giao dịch hoặc liên hệ admin để xác minh."
+    return (
+        f"🟡 <b>Thanh toán Binance</b>\n\n"
+        f"Mã thanh toán: <code>{h(intent['public_code'])}</code>\n"
+        f"Binance ID: <code>{h(binance_id or 'Chưa cấu hình')}</code>\n"
+        f"Số tiền cần chuyển: <b>{fmt_money(int(intent['amount_minor']), intent['currency'])}</b>\n"
+        f"Hết hạn: <code>{h(intent['expires_at'])}</code>\n\n"
+        f"{h(memo)}\n\n"
+        "Sau khi thanh toán, admin hoặc webhook sẽ xác nhận và bot tự giao hàng/cộng ví."
+    )
+
+
+def usdt_bep20_instruction(intent: dict, *, address: str, tolerance: str = "0.02") -> str:
+    amount = fmt_money(int(intent['amount_minor']), intent['currency'])
+    return (
+        f"🌕 <b>Thanh toán USDT (BEP20)</b>\n\n"
+        f"Mã thanh toán: <code>{h(intent['public_code'])}</code>\n"
+        f"Vui lòng chuyển đúng: <b>{amount}</b>\n"
+        f"Địa chỉ BEP20:\n<code>{h(address or 'Chưa cấu hình USDT_BEP20_ADDRESS')}</code>\n"
+        f"Hết hạn: <code>{h(intent['expires_at'])}</code>\n\n"
+        f"⚠️ Sai số cho phép: <b>{h(tolerance)} USDT</b>. Phí mạng không được trừ vào số tiền shop nhận.\n"
+        "Sau khi chuyển, gửi TXID/hash cho admin hoặc bấm làm mới nếu đã có webhook/đối soát."
+    )
+
+
+def usdt_qr_url(address: str) -> str:
+    import urllib.parse
+    data = urllib.parse.quote(address or "")
+    return f"https://api.qrserver.com/v1/create-qr-code/?size=420x420&data={data}"
+
+
 def wallet(balances: dict[str, int]) -> str:
     lines = ["💰 <b>Ví của bạn</b>", ""]
     if balances:
@@ -332,9 +366,16 @@ def _delivery_inline_text(order: dict, rows: list[dict]) -> str:
         "",
         "🔐 <b>Thông tin hàng</b>",
     ]
+    raw_lines: list[str] = []
     for idx, row in enumerate(rows, start=1):
-        item = _format_delivery_content(order, str(row['delivered_content']), html_mode=True)
+        raw = str(row['delivered_content'])
+        item = _format_delivery_content(order, raw, html_mode=True)
         lines.append(f"{idx}. {item}")
+        raw_lines.append(raw)
+    if raw_lines:
+        copy_block = "\n".join(raw_lines)
+        if len(copy_block) <= 1200:
+            lines.extend(["", "📋 <b>Bản copy nhanh</b>", f"<pre>{h(copy_block)}</pre>"])
     lines.append("\nVui lòng lưu lại thông tin. Nếu hàng lỗi, vào 💬 Hỗ trợ để liên hệ admin.")
     return "\n".join(lines)
 

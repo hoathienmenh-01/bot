@@ -28,7 +28,7 @@ def iso(dt: datetime) -> str:
 
 
 def public_code(prefix: str) -> str:
-    return f"{prefix}{secrets.token_hex(4).upper()}"
+    return f"{prefix}{secrets.token_hex(8).upper()}"
 
 
 class OrderService:
@@ -42,6 +42,9 @@ class OrderService:
         expires_at = iso(utcnow() + timedelta(minutes=self.order_expires_minutes))
         code = public_code("ORD")
         with self.db.transaction() as conn:
+            buyer = conn.execute("SELECT is_banned FROM users WHERE id=?", (user_id,)).fetchone()
+            if not buyer or int(buyer["is_banned"] or 0):
+                raise PermissionError("user is banned or does not exist")
             product = conn.execute("SELECT * FROM products WHERE id=? AND is_active=1", (product_id,)).fetchone()
             if not product:
                 raise ValueError("product not found or inactive")
@@ -138,23 +141,34 @@ class OrderService:
             if self._is_expired(order):
                 self._cancel_in_conn(conn, order_id, "expired")
                 raise OrderStateError("order expired")
-            WalletService.debit_in_conn(
-                conn,
-                user_id=int(order["user_id"]),
-                currency=order["currency"],
-                amount_minor=int(order["total_amount_minor"]),
-                reference_type="order",
-                reference_id=order["public_code"],
-                idempotency_key=f"wallet-pay:{order['public_code']}",
-                metadata={"order_id": order_id},
-            )
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO cash_ledger(event_type, provider, direction, currency, amount_minor, reference_type, reference_id, idempotency_key, note)
-                VALUES('sale', 'wallet', 'internal', ?, ?, 'order', ?, ?, 'Paid from user wallet')
-                """,
-                (order["currency"], order["total_amount_minor"], order["public_code"], f"cash-sale-wallet:{order['public_code']}"),
-            )
+            total_minor = int(order["total_amount_minor"])
+            if total_minor > 0:
+                WalletService.debit_in_conn(
+                    conn,
+                    user_id=int(order["user_id"]),
+                    currency=order["currency"],
+                    amount_minor=total_minor,
+                    reference_type="order",
+                    reference_id=order["public_code"],
+                    idempotency_key=f"wallet-pay:{order['public_code']}",
+                    metadata={"order_id": order_id},
+                )
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO cash_ledger(event_type, provider, direction, currency, amount_minor, reference_type, reference_id, idempotency_key, note)
+                    VALUES('sale', 'wallet', 'internal', ?, ?, 'order', ?, ?, 'Paid from user wallet')
+                    """,
+                    (order["currency"], total_minor, order["public_code"], f"cash-sale-wallet:{order['public_code']}"),
+                )
+            else:
+                # Free/test products must not attempt a zero wallet debit.
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO cash_ledger(event_type, provider, direction, currency, amount_minor, reference_type, reference_id, idempotency_key, note)
+                    VALUES('sale', 'free', 'internal', ?, 0, 'order', ?, ?, 'Free/zero-price order')
+                    """,
+                    (order["currency"], order["public_code"], f"cash-sale-free:{order['public_code']}"),
+                )
             delivery = self._mark_paid_and_deliver_in_conn(conn, order_id, "wallet")
             return {"order": self._get_order_in_conn(conn, order_id), "delivery": delivery}
 
@@ -254,13 +268,27 @@ class OrderService:
             conn.execute("UPDATE orders SET status='refunded' WHERE id=?", (order_id,))
             return {"order": self._get_order_in_conn(conn, order_id), "balance_after_minor": balance}
 
-    def sweep_expired(self) -> int:
+    def sweep_expired_details(self) -> list[dict]:
         now = iso(utcnow())
         with self.db.transaction() as conn:
-            rows = conn.execute("SELECT id FROM orders WHERE status='awaiting_payment' AND expires_at < ?", (now,)).fetchall()
-            for row in rows:
+            rows = conn.execute(
+                """
+                SELECT o.*, p.name AS product_name, u.telegram_id
+                  FROM orders o
+                  JOIN products p ON p.id=o.product_id
+                  JOIN users u ON u.id=o.user_id
+                 WHERE o.status='awaiting_payment' AND o.expires_at < ?
+                 ORDER BY o.id ASC
+                """,
+                (now,),
+            ).fetchall()
+            expired = [dict(row) for row in rows]
+            for row in expired:
                 self._cancel_in_conn(conn, int(row["id"]), "expired")
-            return len(rows)
+            return expired
+
+    def sweep_expired(self) -> int:
+        return len(self.sweep_expired_details())
 
     def order_history(self, user_id: int, limit: int = 20) -> list[dict]:
         with self.db.connect() as conn:

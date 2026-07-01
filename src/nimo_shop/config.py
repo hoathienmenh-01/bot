@@ -24,7 +24,7 @@ class Settings:
     admin_ids: tuple[int, ...]
     database_path: Path
     deposit_expires_minutes: int = 15
-    order_expires_minutes: int = 20
+    order_expires_minutes: int = 15
     bank_enabled: bool = True
     sepay_api_key: str = ""
     bank_bin: str = ""
@@ -42,6 +42,10 @@ class Settings:
     preorder_deposit_percent: int = 10
     stock_duplicate_policy: str = "allow"
     api_public_base_url: str = "http://127.0.0.1:8080"
+    binance_pay_id: str = ""
+    binance_pay_note: str = ""
+    usdt_bep20_address: str = ""
+    usdt_bep20_tolerance: str = "0.02"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -51,7 +55,7 @@ class Settings:
             admin_ids=tuple(int(x) for x in _csv(os.getenv("ADMIN_IDS")) if x.isdigit()),
             database_path=Path(os.getenv("DATABASE_PATH", "data/shop.db")),
             deposit_expires_minutes=int(os.getenv("DEPOSIT_EXPIRES_MINUTES", "15")),
-            order_expires_minutes=int(os.getenv("ORDER_EXPIRES_MINUTES", "20")),
+            order_expires_minutes=int(os.getenv("ORDER_EXPIRES_MINUTES", "15")),
             bank_enabled=_bool(os.getenv("BANK_ENABLED"), True),
             sepay_api_key=os.getenv("SEPAY_API_KEY", ""),
             bank_bin=os.getenv("BANK_BIN", ""),
@@ -69,4 +73,8 @@ class Settings:
             preorder_deposit_percent=max(0, min(100, int(os.getenv("PREORDER_DEPOSIT_PERCENT", "10")))),
             stock_duplicate_policy=os.getenv("STOCK_DUPLICATE_POLICY", "allow").strip().lower(),
             api_public_base_url=os.getenv("API_PUBLIC_BASE_URL", "http://127.0.0.1:8080").strip().rstrip("/"),
+            binance_pay_id=os.getenv("BINANCE_PAY_ID", "").strip(),
+            binance_pay_note=os.getenv("BINANCE_PAY_NOTE", "").strip(),
+            usdt_bep20_address=os.getenv("USDT_BEP20_ADDRESS", "").strip(),
+            usdt_bep20_tolerance=os.getenv("USDT_BEP20_TOLERANCE", "0.02").strip(),
         )

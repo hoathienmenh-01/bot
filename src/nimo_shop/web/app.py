@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import html
 import json
 import os
@@ -42,6 +44,16 @@ LANG = {
     },
 }
 
+
+NAV_GROUPS = [
+    ("Tổng quan", [("/", "dashboard"), ("/status", "status"), ("/logs", "logs"), ("/audit", "audit")]),
+    ("Bán hàng", [("/orders", "orders"), ("/preorders", "preorders"), ("/deliveries", "deliveries"), ("/coupons", "coupons"), ("/notifications", "notifications")]),
+    ("Sản phẩm & kho", [("/categories", "categories"), ("/products", "products"), ("/stock", "stock"), ("/imports", "imports"), ("/low-stock", "low_stock")]),
+    ("Thanh toán & ví", [("/wallets", "wallets"), ("/payments", "payments"), ("/finance", "finance"), ("/reconcile", "reconcile"), ("/exports", "exports")]),
+    ("Khách hàng & API", [("/users", "users")]),
+    ("Hệ thống", [("/settings", "settings"), ("/bots", "bots"), ("/backup", "backup"), ("/roles", "roles"), ("/guide", "guide")]),
+]
+
 NAV = [
     ("/", "dashboard"), ("/orders", "orders"), ("/preorders", "preorders"), ("/products", "products"), ("/categories", "categories"),
     ("/stock", "stock"), ("/users", "users"), ("/wallets", "wallets"), ("/finance", "finance"),
@@ -49,6 +61,93 @@ NAV = [
     ("/backup", "backup"), ("/imports", "imports"), ("/exports", "exports"), ("/coupons", "coupons"), ("/low-stock", "low_stock"),
     ("/deliveries", "deliveries"), ("/roles", "roles"), ("/status", "status"), ("/settings", "settings"), ("/guide", "guide"), ("/audit", "audit"), ("/logs", "logs"),
 ]
+
+# Page/action permission map. Earlier versions stored admin roles but did not
+# enforce them, which made every logged-in admin effectively an owner. Keep the
+# policy simple and conservative for a commercial shop.
+ROLE_SECTIONS = {
+    "owner": {"*"},
+    "finance": {"dashboard", "orders", "users", "wallets", "finance", "payments", "reconcile", "exports", "status", "audit", "guide"},
+    "stock": {"dashboard", "orders", "products", "categories", "stock", "imports", "exports", "low_stock", "status", "audit", "guide"},
+    "support": {"dashboard", "orders", "preorders", "users", "notifications", "deliveries", "status", "audit", "guide"},
+    "viewer": {"dashboard", "orders", "products", "categories", "stock", "users", "finance", "payments", "reconcile", "preorders", "deliveries", "status", "audit", "guide"},
+}
+
+POST_SECTIONS = {
+    "/categories/create": "categories",
+    "/categories/update": "categories",
+    "/preorders/cancel": "preorders",
+    "/preorders/fulfill": "preorders",
+    "/products/create": "products",
+    "/products/update": "products",
+    "/products/delete": "products",
+    "/stock/import": "stock",
+    "/orders/cancel": "orders",
+    "/orders/refund": "orders",
+    "/wallets/adjust": "wallets",
+    "/payments/confirm": "payments",
+    "/bots/create": "bots",
+    "/bots/update": "bots",
+    "/bots/delete": "bots",
+    "/notifications/create": "notifications",
+    "/backup/restore": "backup",
+    "/status/check-token": "status",
+    "/imports/catalog": "imports",
+    "/reconcile/review": "reconcile",
+    "/coupons/create": "coupons",
+    "/coupons/update": "coupons",
+    "/coupons/delete": "coupons",
+    "/roles/create": "roles",
+    "/roles/update": "roles",
+    "/low-stock/notify": "low_stock",
+    "/settings": "settings",
+}
+
+WRITE_ROLES = {
+    "categories": {"owner", "stock"},
+    "products": {"owner", "stock"},
+    "stock": {"owner", "stock"},
+    "imports": {"owner", "stock"},
+    "low_stock": {"owner", "stock"},
+    "wallets": {"owner", "finance"},
+    "payments": {"owner", "finance"},
+    "finance": {"owner", "finance"},
+    "reconcile": {"owner", "finance"},
+    "orders": {"owner", "finance", "support"},
+    "preorders": {"owner", "support"},
+    "notifications": {"owner", "support"},
+    "settings": {"owner"},
+    "bots": {"owner"},
+    "backup": {"owner"},
+    "roles": {"owner"},
+    "coupons": {"owner", "finance"},
+    "status": {"owner"},
+}
+
+
+def section_for_path(path: str) -> str:
+    if path in {"", "/"}:
+        return "dashboard"
+    if path.startswith("/products/preview"):
+        return "products"
+    if path.startswith("/media/products/"):
+        return "products"
+    if path.startswith("/low-stock"):
+        return "low_stock"
+    first = path.strip("/").split("/", 1)[0].replace("-", "_")
+    return {"logs": "logs"}.get(first, first or "dashboard")
+
+
+def role_can_read(role: str, path: str) -> bool:
+    allowed = ROLE_SECTIONS.get(role or "viewer", ROLE_SECTIONS["viewer"])
+    return "*" in allowed or section_for_path(path) in allowed
+
+
+def role_can_write(role: str, path: str) -> bool:
+    if role == "owner":
+        return True
+    section = POST_SECTIONS.get(path, section_for_path(path))
+    return role in WRITE_ROLES.get(section, set())
 
 SETTING_GROUPS = [
     {
@@ -120,7 +219,7 @@ SETTING_META: dict[str, dict[str, str]] = {
 CSS = r"""
 :root{--bg:#f4f7fb;--panel:#ffffff;--panel2:#eef4ff;--text:#0f172a;--muted:#64748b;--brand:#2563eb;--brand2:#7c3aed;--line:#e2e8f0;--danger:#dc2626;--ok:#16a34a;--warn:#d97706;--shadow:0 18px 45px rgba(15,23,42,.09);--radius:20px;--input:#fbfdff}
 [data-theme="dark"]{--bg:#07111f;--panel:#101827;--panel2:#16243a;--text:#e5e7eb;--muted:#9aa8bd;--brand:#60a5fa;--brand2:#a78bfa;--line:#26364d;--danger:#fb7185;--ok:#4ade80;--warn:#fbbf24;--shadow:0 20px 55px rgba(0,0,0,.38);--input:#0b1526}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,rgba(37,99,235,.13),transparent 35%),var(--bg);color:var(--text);font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}a{color:inherit;text-decoration:none}button,.btn{border:0;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;padding:10px 14px;border-radius:13px;cursor:pointer;font-weight:800;box-shadow:0 10px 22px rgba(37,99,235,.22);display:inline-flex;align-items:center;gap:7px}.btn.secondary,button.secondary{background:var(--panel2);color:var(--text);box-shadow:none;border:1px solid var(--line)}.btn.danger,button.danger{background:var(--danger);box-shadow:none}.btn.ghost,button.ghost{background:transparent;color:var(--text);border:1px solid var(--line);box-shadow:none}.btn.small,button.small{padding:7px 10px;border-radius:10px;font-size:13px}.layout{display:grid;grid-template-columns:280px 1fr;min-height:100vh}.sidebar{padding:22px;background:rgba(255,255,255,.78);backdrop-filter:blur(16px);border-right:1px solid var(--line);position:sticky;top:0;height:100vh;overflow:auto}[data-theme="dark"] .sidebar{background:rgba(16,24,39,.84)}.brand{font-weight:900;font-size:22px;letter-spacing:.2px;margin-bottom:6px}.brand-badge{display:inline-flex;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;border-radius:12px;padding:6px 10px;font-size:12px;margin-bottom:12px}.subtitle{color:var(--muted);font-size:13px;margin-bottom:20px}.nav a{display:flex;padding:12px 14px;border-radius:14px;color:var(--muted);margin:5px 0;font-weight:700}.nav a.active,.nav a:hover{background:var(--panel2);color:var(--text)}.main{padding:26px;max-width:1500px}.topbar{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:22px}.h1{font-size:30px;font-weight:900;margin:0}.toolbar{display:flex;gap:9px;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px;margin-bottom:16px}.card h3,.card h2{margin-top:0}.metric{font-size:28px;font-weight:900}.muted{color:var(--muted)}.help{color:var(--muted);font-size:13px;margin-top:5px}.status{display:inline-flex;padding:5px 10px;border-radius:999px;background:var(--panel2);font-size:12px;font-weight:800}.status.delivered,.status.paid,.status.order_delivered,.status.wallet_credited,.status.active{color:var(--ok)}.status.cancelled,.status.refunded,.status.rejected,.status.unmatched,.status.inactive{color:var(--danger)}.status.awaiting_payment,.status.pending,.status.reserved{color:var(--warn)}.table-wrap{overflow:auto}.premium-table{min-width:900px}table{width:100%;border-collapse:collapse}th,td{padding:13px 11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.04em}tr:hover td{background:rgba(37,99,235,.035)}label{font-weight:800;display:block}input,select,textarea{width:100%;border:1px solid var(--line);background:var(--input);color:var(--text);padding:11px 13px;border-radius:13px;font:inherit;margin-top:6px}textarea{min-height:110px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.form-grid .full{grid-column:1/-1}.alert{padding:13px 15px;border-radius:15px;margin-bottom:14px;background:var(--panel2);border:1px solid var(--line)}.alert.ok{border-color:rgba(22,163,74,.45)}.alert.err{border-color:rgba(220,38,38,.45);color:var(--danger)}.login{min-height:100vh;display:grid;place-items:center;padding:24px}.login-card{max-width:440px;width:100%}.pill{display:inline-flex;gap:8px;align-items:center;padding:7px 10px;border-radius:999px;background:var(--panel2);color:var(--muted);font-weight:800;font-size:12px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.product-title{font-weight:900}.action-row{display:flex;gap:7px;flex-wrap:wrap}.danger-zone{border:1px dashed rgba(220,38,38,.55);background:rgba(220,38,38,.04)}details.setup-section{border:1px solid var(--line);border-radius:18px;background:var(--panel);margin-bottom:14px;overflow:hidden}details.setup-section[open]{box-shadow:var(--shadow)}details.setup-section summary{cursor:pointer;padding:16px 18px;font-weight:900;list-style:none;display:flex;justify-content:space-between;gap:12px}details.setup-section summary::-webkit-details-marker{display:none}.setup-content{border-top:1px solid var(--line);padding:18px}.setting-field{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px}.setting-field.secret input::placeholder{color:var(--muted)}.hint-box,.info-box{border-left:4px solid var(--brand);background:var(--panel2);padding:13px 15px;border-radius:14px;margin-bottom:16px}.info-box{font-size:14px}.hide-mobile{display:inline}@media(max-width:980px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.main{padding:16px}.grid,.grid2,.form-grid{grid-template-columns:1fr}.hide-mobile{display:none}.topbar{display:block}.premium-table{min-width:760px}}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,rgba(37,99,235,.13),transparent 35%),var(--bg);color:var(--text);font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}a{color:inherit;text-decoration:none}button,.btn{border:0;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;padding:10px 14px;border-radius:13px;cursor:pointer;font-weight:800;box-shadow:0 10px 22px rgba(37,99,235,.22);display:inline-flex;align-items:center;gap:7px}.btn.secondary,button.secondary{background:var(--panel2);color:var(--text);box-shadow:none;border:1px solid var(--line)}.btn.danger,button.danger{background:var(--danger);box-shadow:none}.btn.ghost,button.ghost{background:transparent;color:var(--text);border:1px solid var(--line);box-shadow:none}.btn.small,button.small{padding:7px 10px;border-radius:10px;font-size:13px}.layout{display:grid;grid-template-columns:280px 1fr;min-height:100vh}.sidebar{padding:22px;background:rgba(255,255,255,.78);backdrop-filter:blur(16px);border-right:1px solid var(--line);position:sticky;top:0;height:100vh;overflow:auto}[data-theme="dark"] .sidebar{background:rgba(16,24,39,.84)}.brand{font-weight:900;font-size:22px;letter-spacing:.2px;margin-bottom:6px}.brand-badge{display:inline-flex;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;border-radius:12px;padding:6px 10px;font-size:12px;margin-bottom:12px}.subtitle{color:var(--muted);font-size:13px;margin-bottom:20px}.nav-heading{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:900;margin:14px 8px 6px}.nav-group{margin-bottom:7px}.nav a{display:flex;padding:12px 14px;border-radius:14px;color:var(--muted);margin:5px 0;font-weight:700}.nav a.active,.nav a:hover{background:var(--panel2);color:var(--text)}.main{padding:26px;max-width:1500px}.topbar{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:22px}.h1{font-size:30px;font-weight:900;margin:0}.toolbar{display:flex;gap:9px;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px;margin-bottom:16px}.card h3,.card h2{margin-top:0}.metric{font-size:28px;font-weight:900}.muted{color:var(--muted)}.help{color:var(--muted);font-size:13px;margin-top:5px}.status{display:inline-flex;padding:5px 10px;border-radius:999px;background:var(--panel2);font-size:12px;font-weight:800}.status.delivered,.status.paid,.status.order_delivered,.status.wallet_credited,.status.active{color:var(--ok)}.status.cancelled,.status.refunded,.status.rejected,.status.unmatched,.status.inactive{color:var(--danger)}.status.awaiting_payment,.status.pending,.status.reserved{color:var(--warn)}.table-wrap{overflow:auto}.premium-table{min-width:900px}table{width:100%;border-collapse:collapse}th,td{padding:13px 11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.04em}tr:hover td{background:rgba(37,99,235,.035)}label{font-weight:800;display:block}input,select,textarea{width:100%;border:1px solid var(--line);background:var(--input);color:var(--text);padding:11px 13px;border-radius:13px;font:inherit;margin-top:6px}textarea{min-height:110px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.form-grid .full{grid-column:1/-1}.alert{padding:13px 15px;border-radius:15px;margin-bottom:14px;background:var(--panel2);border:1px solid var(--line)}.alert.ok{border-color:rgba(22,163,74,.45)}.alert.err{border-color:rgba(220,38,38,.45);color:var(--danger)}.login{min-height:100vh;display:grid;place-items:center;padding:24px}.login-card{max-width:440px;width:100%}.pill{display:inline-flex;gap:8px;align-items:center;padding:7px 10px;border-radius:999px;background:var(--panel2);color:var(--muted);font-weight:800;font-size:12px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.product-title{font-weight:900}.action-row{display:flex;gap:7px;flex-wrap:wrap}.danger-zone{border:1px dashed rgba(220,38,38,.55);background:rgba(220,38,38,.04)}details.setup-section{border:1px solid var(--line);border-radius:18px;background:var(--panel);margin-bottom:14px;overflow:hidden}details.setup-section[open]{box-shadow:var(--shadow)}details.setup-section summary{cursor:pointer;padding:16px 18px;font-weight:900;list-style:none;display:flex;justify-content:space-between;gap:12px}details.setup-section summary::-webkit-details-marker{display:none}.setup-content{border-top:1px solid var(--line);padding:18px}.setting-field{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px}.setting-field.secret input::placeholder{color:var(--muted)}.hint-box,.info-box{border-left:4px solid var(--brand);background:var(--panel2);padding:13px 15px;border-radius:14px;margin-bottom:16px}.info-box{font-size:14px}.hide-mobile{display:inline}@media(max-width:980px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.main{padding:16px}.grid,.grid2,.form-grid{grid-template-columns:1fr}.hide-mobile{display:none}.topbar{display:block}.premium-table{min-width:760px}}
 """
 
 
@@ -219,9 +318,14 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return
         self._send(b"", int(HTTPStatus.SEE_OTHER), headers=headers)
 
-    def _read_form(self) -> dict[str, Any]:
+    def _read_limited_body(self, *, max_bytes: int) -> bytes:
         length = int(self.headers.get("Content-Length", "0") or 0)
-        raw_bytes = self.rfile.read(length) if length else b""
+        if length > max_bytes:
+            raise ValueError(f"request body too large: max {max_bytes} bytes")
+        return self.rfile.read(length) if length else b""
+
+    def _read_form(self) -> dict[str, Any]:
+        raw_bytes = self._read_limited_body(max_bytes=10 * 1024 * 1024)
         content_type = self.headers.get("Content-Type", "")
         if content_type.startswith("multipart/form-data"):
             form: dict[str, Any] = {}
@@ -285,7 +389,16 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
     def _page(self, title_key: str, body: str, *, active: str | None = None, alert: str = "", error: str = "") -> str:
         lang, theme = self._theme_lang()
         session = self._session()
-        nav = "".join(f'<a class="{("active" if active == path else "")}" href="{path}">{tr(lang, key)}</a>' for path, key in NAV)
+        role = session.role if session else "viewer"
+        nav_parts = []
+        for group_title, items in NAV_GROUPS:
+            links = []
+            for path, key in items:
+                if role_can_read(role, path):
+                    links.append(f'<a class="{("active" if active == path else "")}" href="{path}">{tr(lang, key)}</a>')
+            if links:
+                nav_parts.append(f'<div class="nav-group"><div class="nav-heading">{esc(group_title)}</div>' + "".join(links) + '</div>')
+        nav = "".join(nav_parts)
         toolbar_qs_light = urlencode({"theme": "light", "lang": lang})
         toolbar_qs_dark = urlencode({"theme": "dark", "lang": lang})
         switch_lang = "en" if lang == "vi" else "vi"
@@ -301,21 +414,42 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
     def _login_page(self, error: str = "") -> str:
         lang, theme = self._theme_lang()
         err = f'<div class="alert err">{esc(error)}</div>' if error else ""
-        return f"""<!doctype html><html lang="{esc(lang)}" data-theme="{esc(theme)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Đăng nhập - NIMO</title><style>{CSS}</style></head><body><div class="login"><div class="card login-card"><div class="brand-badge">Premium Admin</div><div class="brand">NIMO Shop Admin</div><p class="muted">Đăng nhập để quản lý sản phẩm, kho hàng, đơn, ví và cấu hình thanh toán.</p>{err}<form method="post" action="/login"><label>Tên đăng nhập<input name="username" autocomplete="username" placeholder="admin"></label><br><label>Mật khẩu<input type="password" name="password" autocomplete="current-password" placeholder="admin12345"></label><br><br><button>{esc(tr(lang,'login'))}</button></form></div></div></body></html>"""
+        return f"""<!doctype html><html lang="{esc(lang)}" data-theme="{esc(theme)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Đăng nhập - NIMO</title><style>{CSS}</style></head><body><div class="login"><div class="card login-card"><div class="brand-badge">Premium Admin</div><div class="brand">NIMO Shop Admin</div><p class="muted">Đăng nhập để quản lý sản phẩm, kho hàng, đơn, ví và cấu hình thanh toán.</p>{err}<form method="post" action="/login"><label>Tên đăng nhập<input name="username" autocomplete="username" placeholder="admin"></label><br><label>Mật khẩu<input type="password" name="password" autocomplete="current-password" placeholder="mật khẩu đã cấu hình"></label><br><br><button>{esc(tr(lang,'login'))}</button></form></div></div></body></html>"""
 
 
     def _send_json(self, payload: dict[str, Any] | list[Any], status: int = 200) -> None:
         self._send(json.dumps(payload, ensure_ascii=False), status=status, content_type="application/json; charset=utf-8")
 
     def _read_json_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0") or 0)
-        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        raw = self._read_limited_body(max_bytes=256 * 1024).decode("utf-8")
         if not raw.strip():
             return {}
         if self.headers.get("Content-Type", "").startswith("application/json") or raw.strip().startswith("{"):
             data = json.loads(raw)
             return data if isinstance(data, dict) else {}
         return {k: v[-1] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+
+    def _webhook_secret(self) -> str:
+        try:
+            setting = self.service.get_settings().get("WEBHOOK_SHARED_SECRET")
+            if isinstance(setting, dict):
+                value = setting.get("value")
+            else:
+                value = setting
+            return str(value or os.getenv("WEBHOOK_SHARED_SECRET") or "").strip()
+        except Exception:
+            return str(os.getenv("WEBHOOK_SHARED_SECRET") or "").strip()
+
+    def _verify_webhook_request(self, raw_body: str) -> bool:
+        secret = self._webhook_secret()
+        if not secret:
+            return False
+        direct = self.headers.get("X-NIMO-Webhook-Secret", "").strip()
+        if direct and hmac.compare_digest(direct, secret):
+            return True
+        signature = self.headers.get("X-NIMO-Signature", "").strip()
+        expected = hmac.new(secret.encode("utf-8"), raw_body.encode("utf-8"), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(signature, expected) or hmac.compare_digest(signature, f"sha256={expected}")
 
     def _api_key_from_request(self) -> str:
         auth = self.headers.get("Authorization", "").strip()
@@ -390,11 +524,18 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             if balance < total:
                 self._send_json({"ok": False, "error": "insufficient_balance", "currency": product["currency"], "required_minor": total, "balance_minor": balance}, status=402)
                 return
-            order_service = OrderService(self.service.db)
+            idem_key = str(payload.get("idempotency_key") or self.headers.get("Idempotency-Key") or "").strip()
+            if idem_key:
+                with self.service.db.connect() as conn:
+                    row = conn.execute("SELECT response_json FROM buyer_api_idempotency WHERE user_id=? AND idempotency_key=?", (int(user["id"]), idem_key)).fetchone()
+                    if row and row["response_json"]:
+                        self._send_json(json.loads(row["response_json"]))
+                        return
+            order_service = OrderService(self.service.db, order_expires_minutes=self.service.order_expires_minutes())
             order = order_service.create_order(user_id=int(user["id"]), product_id=product_id, quantity=quantity)
             result = order_service.pay_with_wallet(int(order["id"]), expected_user_id=int(user["id"]))
             delivery = [str(r["delivered_content"]) for r in result.get("delivery") or []]
-            self._send_json({
+            response_payload = {
                 "ok": True,
                 "order": {
                     "id": int(result["order"]["id"]),
@@ -408,7 +549,14 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                     "total_display": fmt_money(int(result["order"]["total_amount_minor"]), result["order"]["currency"]),
                 },
                 "delivery": delivery,
-            })
+            }
+            if idem_key:
+                with self.service.db.transaction() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO buyer_api_idempotency(user_id,idempotency_key,response_json) VALUES(?,?,?)",
+                        (int(user["id"]), idem_key, json.dumps(response_payload, ensure_ascii=False)),
+                    )
+            self._send_json(response_payload)
         except InsufficientFunds:
             self._send_json({"ok": False, "error": "insufficient_balance"}, status=402)
         except OutOfStock:
@@ -446,11 +594,14 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         session = self._require_login()
         if not session:
             return
+        if not role_can_read(session.role, parsed.path):
+            self._send(self._page("dashboard", "", active="/", error="Bạn không có quyền truy cập trang này."), status=403)
+            return
         if parsed.path.startswith("/media/products/"):
             rel = parsed.path.lstrip("/")
             file_path = (self.service.project_root / rel).resolve()
             media_root = (self.service.project_root / "media" / "products").resolve()
-            if not str(file_path).startswith(str(media_root)) or not file_path.exists() or not file_path.is_file():
+            if not file_path.is_relative_to(media_root) or not file_path.exists() or not file_path.is_file():
                 self.send_error(404)
                 return
             ext = file_path.suffix.lower()
@@ -459,7 +610,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/backup/download":
             try:
-                include_env = parse_qs(parsed.query).get("include_env", ["1"])[0] != "0"
+                include_env = parse_qs(parsed.query).get("include_env", ["0"])[0] == "1"
                 backup_path = self.service.create_backup(include_env=include_env, admin_id=session.admin_id)
                 data = backup_path.read_bytes()
                 self._send(data, content_type="application/zip", headers={"Content-Disposition": f"attachment; filename={backup_path.name}"})
@@ -486,11 +637,20 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             self._api_purchase()
             return
         if parsed.path in {"/webhook/sepay", "/webhook/binance"}:
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            raw = self.rfile.read(length).decode("utf-8") if length else ""
+            try:
+                raw = self._read_limited_body(max_bytes=128 * 1024).decode("utf-8")
+            except Exception as exc:
+                self._send(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), status=413, content_type="application/json; charset=utf-8")
+                return
+            if not self._verify_webhook_request(raw):
+                self._send(json.dumps({"ok": False, "error": "invalid_webhook_signature"}, ensure_ascii=False), status=401, content_type="application/json; charset=utf-8")
+                return
             try:
                 payload = json.loads(raw) if raw.strip().startswith("{") else {k: v[-1] for k, v in parse_qs(raw, keep_blank_values=True).items()}
-                provider = "sepay" if parsed.path.endswith("sepay") else "binance"
+                # Internal payment intents use provider ids "bank" and
+                # "binance_pay". The public URL names are /webhook/sepay and
+                # /webhook/binance, so map them here before reconciliation.
+                provider = "bank" if parsed.path.endswith("sepay") else "binance_pay"
                 result = self.service.ingest_webhook_event(
                     provider=provider,
                     tx_id=str(payload.get("tx_id") or payload.get("id") or payload.get("transaction_id") or payload.get("provider_tx_id") or ""),
@@ -510,7 +670,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                 self._send(self._login_page("Sai tài khoản hoặc mật khẩu"), status=401)
                 return
             token = create_session(self.session_secret, admin_id=int(admin["id"]), username=admin["username"], role=admin["role"])
-            self._redirect("/", [f"nimo_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200"])
+            secure = "; Secure" if str(os.getenv("WEB_COOKIE_SECURE", "")).lower() in {"1", "true", "yes", "on"} else ""
+            self._redirect("/", [f"nimo_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200{secure}"])
             return
         session = self._require_login()
         if not session:
@@ -518,6 +679,9 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         form = self._read_form()
         if not self._verify_post(form):
             self._send(self._page("dashboard", "", active="/", error="CSRF token không hợp lệ. Hãy tải lại trang."), status=403)
+            return
+        if not role_can_write(session.role, parsed.path):
+            self._send(self._page("dashboard", "", active="/", error="Bạn không có quyền thực hiện thao tác này."), status=403)
             return
         try:
             redirect_to = self._route_post(parsed.path, form, session.admin_id)
@@ -1068,10 +1232,21 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
 
 
 def create_server(db_path: str | Path, *, host: str = "127.0.0.1", port: int = 8080, session_secret: str | None = None, project_root: str | Path | None = None, bootstrap_username: str = "admin", bootstrap_password: str | None = None) -> ThreadingHTTPServer:
+    import secrets
+
     db = Database(db_path)
     service = AdminWebService(db, project_root=project_root)
     service.init(bootstrap_username=bootstrap_username, bootstrap_password=bootstrap_password)
     server = ThreadingHTTPServer((host, port), AdminRequestHandler)
     server.service = service  # type: ignore[attr-defined]
-    server.session_secret = session_secret or os.getenv("WEB_SESSION_SECRET") or "change-this-web-session-secret"  # type: ignore[attr-defined]
+    secret = session_secret or os.getenv("WEB_SESSION_SECRET") or ""
+    local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if not secret:
+        if host in local_hosts:
+            secret = secrets.token_urlsafe(32)
+        else:
+            raise ValueError("WEB_SESSION_SECRET is required when Web Admin is exposed outside localhost")
+    if secret == "change-this-web-session-secret" or (host not in local_hosts and len(secret) < 32):
+        raise ValueError("WEB_SESSION_SECRET is too weak; use a random string of at least 32 characters")
+    server.session_secret = secret  # type: ignore[attr-defined]
     return server

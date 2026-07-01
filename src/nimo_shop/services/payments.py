@@ -22,11 +22,14 @@ def normalize_provider(provider: str) -> str:
 
 
 def make_payment_code(prefix: str = "NAP") -> str:
-    return f"{prefix}{secrets.token_hex(4).upper()}"
+    # 64-bit random suffix. Earlier 32-bit codes were too easy to guess for a
+    # public webhook/checkout flow. extract_payment_code still accepts legacy
+    # 8-hex codes so existing unpaid intents remain reconcilable after upgrade.
+    return f"{prefix}{secrets.token_hex(8).upper()}"
 
 
 def extract_payment_code(text: str) -> str | None:
-    match = re.search(r"\b(?:NAP|ORD)[A-F0-9]{8}\b", text.upper())
+    match = re.search(r"\b(?:NAP|ORD)[A-F0-9]{8,32}\b", (text or "").upper())
     return match.group(0) if match else None
 
 
@@ -57,7 +60,7 @@ class PaymentService:
         code = make_payment_code("ORD")
         expires = iso(utcnow() + timedelta(minutes=self.deposit_expires_minutes))
         now = iso(utcnow())
-        error: ValueError | None = None
+        error: ValueError | PermissionError | None = None
         result: dict | None = None
         with self.db.transaction() as conn:
             order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
@@ -70,15 +73,34 @@ class PaymentService:
             elif order["expires_at"] < now:
                 OrderService._cancel_in_conn(conn, order_id, "expired")
                 error = ValueError("order expired")
+            elif int(order["total_amount_minor"] or 0) <= 0:
+                # Free/fully-prepaid orders must be delivered through the wallet/free
+                # path. payment_intents intentionally require amount_minor > 0.
+                error = ValueError("zero-amount orders do not need external payment")
             else:
-                c = conn.execute(
+                # Reuse a still-pending intent for the same order/provider.
+                # Without this, repeatedly pressing a payment button creates many
+                # valid ORD codes for one order, which confuses customers and
+                # makes reconciliation noisy.
+                existing = conn.execute(
                     """
-                    INSERT INTO payment_intents(public_code, user_id, order_id, provider, currency, amount_minor, expires_at)
-                    VALUES(?,?,?,?,?,?,?)
+                    SELECT * FROM payment_intents
+                     WHERE order_id=? AND provider=? AND status='pending' AND expires_at>=?
+                     ORDER BY id DESC LIMIT 1
                     """,
-                    (code, order["user_id"], order_id, provider, order["currency"], order["total_amount_minor"], expires),
-                )
-                result = dict(conn.execute("SELECT * FROM payment_intents WHERE id=?", (c.lastrowid,)).fetchone())
+                    (order_id, provider, now),
+                ).fetchone()
+                if existing:
+                    result = dict(existing)
+                else:
+                    c = conn.execute(
+                        """
+                        INSERT INTO payment_intents(public_code, user_id, order_id, provider, currency, amount_minor, expires_at)
+                        VALUES(?,?,?,?,?,?,?)
+                        """,
+                        (code, order["user_id"], order_id, provider, order["currency"], order["total_amount_minor"], expires),
+                    )
+                    result = dict(conn.execute("SELECT * FROM payment_intents WHERE id=?", (c.lastrowid,)).fetchone())
         if error:
             raise error
         assert result is not None
@@ -100,7 +122,8 @@ class PaymentService:
         Money-safety rule: once a real provider transaction is matched to an
         existing payment code, the system must either deliver the order or credit
         the buyer wallet. It must not silently drop underpayments, late payments,
-        duplicate-code payments, or overpayments.
+        duplicate-code payments, overpayments, or admin reconciliation of an
+        earlier unmatched event.
         """
         provider = normalize_provider(provider)
         provider_tx_id = (provider_tx_id or "").strip()
@@ -125,13 +148,33 @@ class PaymentService:
                 """,
                 (provider, provider_tx_id, payment_code, cur, amount_minor, dumps(raw)),
             ).rowcount
+            event = conn.execute(
+                "SELECT * FROM external_payment_events WHERE provider=? AND provider_tx_id=?",
+                (provider, provider_tx_id),
+            ).fetchone()
+            assert event is not None
+
             if inserted == 0:
-                event = conn.execute(
-                    "SELECT * FROM external_payment_events WHERE provider=? AND provider_tx_id=?",
-                    (provider, provider_tx_id),
-                ).fetchone()
-                result = {"status": "duplicate", "event": dict(event)}
-            else:
+                # Already-settled events must remain idempotent. Only previously
+                # unmatched/reviewed/received events may be reconciled by an admin
+                # with the same provider_tx_id and a corrected payment code.
+                if str(event["status"]) not in {"unmatched", "received", "reviewed"}:
+                    result = {"status": "duplicate", "event": dict(event)}
+                else:
+                    conn.execute(
+                        """
+                        UPDATE external_payment_events
+                           SET payment_code=?, currency=?, amount_minor=?, raw_json=?
+                         WHERE provider=? AND provider_tx_id=?
+                        """,
+                        (payment_code, cur, amount_minor, dumps(raw), provider, provider_tx_id),
+                    )
+                    event = conn.execute(
+                        "SELECT * FROM external_payment_events WHERE provider=? AND provider_tx_id=?",
+                        (provider, provider_tx_id),
+                    ).fetchone()
+
+            if result is None:
                 intent = conn.execute(
                     "SELECT * FROM payment_intents WHERE public_code=? AND provider=?",
                     (payment_code, provider),
@@ -148,7 +191,7 @@ class PaymentService:
                     event_type = "order_payment" if intent["order_id"] else "wallet_topup"
                     conn.execute(
                         """
-                        INSERT INTO cash_ledger(event_type, provider, direction, currency, amount_minor, fee_minor, reference_type, reference_id, idempotency_key, note)
+                        INSERT OR IGNORE INTO cash_ledger(event_type, provider, direction, currency, amount_minor, fee_minor, reference_type, reference_id, idempotency_key, note)
                         VALUES(?, ?, 'in', ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
@@ -181,11 +224,12 @@ class PaymentService:
                         )
                         return {"status": status, "intent": intent_dict, "balance_after_minor": balance}
 
+                    now_iso = iso(utcnow())
                     if intent["status"] != "pending":
                         # Same code was paid again after an intent was already settled.
                         # Do not lose that money; credit it to the buyer wallet.
                         result = credit_wallet("wallet_credited_extra_payment", "extra_payment")
-                    elif intent["expires_at"] < iso(utcnow()):
+                    elif intent["expires_at"] < now_iso:
                         conn.execute("UPDATE payment_intents SET status='confirmed', provider_ref=?, confirmed_at=CURRENT_TIMESTAMP WHERE id=?", (provider_tx_id, intent["id"]))
                         if intent["order_id"]:
                             order = conn.execute("SELECT * FROM orders WHERE id=?", (intent["order_id"],)).fetchone()
@@ -193,11 +237,14 @@ class PaymentService:
                                 OrderService._cancel_in_conn(conn, int(order["id"]), "expired")
                         result = credit_wallet("wallet_credited_expired_intent", "expired_intent_payment")
                     elif cur != intent["currency"]:
+                        # Do not auto-settle currency mismatches as a sale. Credit the
+                        # exact received money to wallet for manual review and avoid
+                        # marking the order paid in the wrong currency.
                         conn.execute("UPDATE payment_intents SET status='confirmed', provider_ref=?, confirmed_at=CURRENT_TIMESTAMP WHERE id=?", (provider_tx_id, intent["id"]))
                         result = credit_wallet("wallet_credited_currency_mismatch", "currency_mismatch_payment", {"expected_currency": intent["currency"]})
                     elif intent["order_id"]:
                         order = conn.execute("SELECT * FROM orders WHERE id=?", (intent["order_id"],)).fetchone()
-                        if not order or order["status"] != "awaiting_payment" or order["expires_at"] < iso(utcnow()):
+                        if not order or order["status"] != "awaiting_payment" or order["expires_at"] < now_iso:
                             conn.execute("UPDATE payment_intents SET status='confirmed', provider_ref=?, confirmed_at=CURRENT_TIMESTAMP WHERE id=?", (provider_tx_id, intent["id"]))
                             if order and order["status"] == "awaiting_payment":
                                 OrderService._cancel_in_conn(conn, int(order["id"]), "expired")
@@ -254,7 +301,6 @@ class PaymentService:
             raise error
         assert result is not None
         return result
-
 
     def attach_provider_reference(self, *, intent_id: int, provider_ref: str, metadata: dict | None = None) -> None:
         if not provider_ref:

@@ -1,19 +1,37 @@
-<<<<<<< HEAD
-test
-=======
 # NIMO Telegram Shop Bot Complete
 
 Bot bán hàng Telegram cho sản phẩm số: tài khoản, key, license, gói premium. Bản này tập trung vào an toàn tiền/kho/đơn, Web Admin vận hành bằng trình duyệt và giao diện catalog kiểu shop premium.
 
 ## Trạng thái bản này
 
-- Phiên bản: `2.6.0-menu-api-grid-duplicate-policy`
+- Phiên bản: `2.8.1-commercial-hardening`
 - Core ví/đơn/kho/payment: đã có test chống bán trùng, lệch ví, lệch kho và lỗi thanh toán phổ biến.
 - Telegram UI: single-panel, danh mục/sản phẩm có trạng thái còn hàng/hết hàng, sản phẩm có ảnh/icon/custom emoji.
 - Đặt trước: sản phẩm hết hàng có nút đặt trước; phí đặt trước cấu hình theo `%` trong Web Admin.
 - Web Admin: quản lý dashboard, đơn hàng, đặt trước, sản phẩm, danh mục, kho, user, ví, dòng tiền, payment, cấu hình, audit, backup, coupon, phân quyền, báo cáo.
 - Giao diện web: responsive, light/dark mode, tiếng Việt/English.
-- Test: `68/68 passed`, compileall OK, seed demo OK, audit OK.
+- Test: `81/81 passed`, compileall OK. Bản này đã thêm regression test cho các lỗi thương mại: webhook bắt buộc secret, đối soát unmatched, preorder refund/100% deposit, backup path traversal, user bị ban và Buyer API idempotency.
+
+### Cập nhật v2.8.1 commercial hardening
+
+- Webhook SePay/Binance không còn chấp nhận request unsigned khi thiếu `WEBHOOK_SHARED_SECRET`; production phải dùng secret/chữ ký.
+- Web Admin không còn tạo tài khoản `admin/admin12345`; bắt buộc đặt mật khẩu mạnh qua `.env` hoặc tham số `--password`.
+- `WEB_SESSION_SECRET` không còn fallback sang chuỗi mặc định; khi mở ngoài localhost phải có secret đủ mạnh.
+- Mã thanh toán/đơn/preorder tăng entropy để giảm rủi ro đoán mã.
+- Sửa đối soát giao dịch thật bị lưu `unmatched`: admin có thể reconcile lại cùng `provider_tx_id` mà không bị kẹt duplicate.
+- Sửa preorder: hủy preorder đã cọc sẽ hoàn cọc vào ví; preorder cọc 100% tự giao hàng khi nhập kho; nút fulfill không còn đánh dấu hoàn thành nếu chưa tạo/giao đơn.
+- Sửa đơn 0đ: không tạo external payment intent 0đ; flow ví/free tự giao hàng.
+- Backup restore chặn path traversal trong `media/products`; backup mặc định không kèm `.env`.
+- Buyer API thêm idempotency key và dùng đúng `ORDER_EXPIRES_MINUTES`.
+- Admin Telegram confirm/cancel/refund và nhập kho đã queue thông báo cho khách/preorder giống Web Admin.
+
+### Cập nhật v2.7.0 gộp thanh toán một bot và hardening thương mại
+
+- Một bot shop có thể dùng chung các phương thức: ví nội bộ, chuyển khoản ngân hàng/VietQR/SePay, Binance Pay/USDT. Không cần tách bot thanh toán riêng.
+- Sửa lỗi webhook quan trọng: `/webhook/sepay` giờ khớp đúng payment intent provider `bank`; `/webhook/binance` khớp đúng provider `binance_pay`.
+- Khi khách bấm cùng một phương thức thanh toán nhiều lần cho một đơn, hệ thống tái sử dụng mã ORD đang còn hạn thay vì tạo nhiều mã thanh toán gây rối đối soát.
+- Phân quyền Web Admin đã được enforce thật: finance/stock/support/viewer không còn toàn quyền như owner.
+- Thêm test regression cho webhook SePay/Binance, reuse mã thanh toán, role permission và tùy chọn `WEBHOOK_SHARED_SECRET` chống webhook giả.
 
 
 ### Cập nhật v2.6.0 menu lệnh / API mua hàng / lưới catalog / chính sách dòng trùng
@@ -123,18 +141,14 @@ Mở trên máy tính cùng WiFi:
 http://IP_DIEN_THOAI:8080
 ```
 
-Đăng nhập mặc định nếu chưa đặt env:
+Bản thương mại không còn mật khẩu mặc định. Hãy đặt trong `.env` hoặc truyền `--password` khi chạy lần đầu:
 
-```text
-admin / admin12345
-```
-
-Khuyến nghị đặt trong `.env` trước khi chạy thật:
 
 ```env
 WEB_ADMIN_USERNAME=admin
 WEB_ADMIN_PASSWORD=mat_khau_manh_cua_ban
-WEB_SESSION_SECRET=chuoi_ngau_nhien_rat_dai
+WEB_SESSION_SECRET=chuoi_ngau_nhien_rat_dai_it_nhat_32_ky_tu
+WEBHOOK_SHARED_SECRET=chuoi_ngau_nhien_cho_webhook
 ```
 
 Web Admin có các trang:
@@ -349,7 +363,7 @@ src/nimo_shop/
 
 ## Lưu ý trước khi bán thật
 
-- Đổi `WEB_ADMIN_PASSWORD`, `WEB_SESSION_SECRET`, `BOT_TOKEN`, `SEPAY_API_KEY` trước khi mở shop.
+- Bắt buộc đặt `WEB_ADMIN_PASSWORD`, `WEB_SESSION_SECRET`, `WEBHOOK_SHARED_SECRET`, `BOT_TOKEN`, `SEPAY_API_KEY` trước khi mở shop.
 - Không public web admin trực tiếp ra internet. Nên dùng LAN/VPN/SSH tunnel.
 - Nếu chạy trên điện thoại Android/Termux, bật `termux-wake-lock`, tắt tối ưu pin, backup `data/shop.db` hằng ngày.
 - Test giao dịch thật nhỏ trước khi nhận tiền lớn.
@@ -363,7 +377,7 @@ If `BOT_TOKEN` is empty, placeholder, or invalid, the bot launcher will no longe
 PYTHONPATH=src python -m nimo_shop.main
 ```
 
-It will automatically open Web Admin Setup at `http://127.0.0.1:8080`. Login with `admin / admin12345` if you have not configured another password, then open **Cấu hình / Settings**, enter `BOT_TOKEN`, `ADMIN_IDS`, bank/SePay/Binance values, tick **Ghi ra file .env**, save, and restart the same command.
+It will automatically open Web Admin Setup at `http://127.0.0.1:8080` and print a temporary setup password in the terminal if you did not configure `WEB_ADMIN_PASSWORD`. Open **Cấu hình / Settings**, enter `BOT_TOKEN`, `ADMIN_IDS`, bank/SePay/Binance values, set permanent `WEB_ADMIN_PASSWORD`, `WEB_SESSION_SECRET`, `WEBHOOK_SHARED_SECRET`, tick **Ghi ra file .env**, save, and restart the same command.
 
 You can also run the web admin directly anytime:
 
@@ -524,4 +538,3 @@ media/products/
 
 Backups include `media/products/`, so transferring from phone to computer preserves product images. When the bot successfully sends a product photo, it stores Telegram `file_id` in the database so future sends can use Telegram cache instead of uploading again.
 
->>>>>>> 38fb7d5 (Add telegram menu buyer API catalog grid and duplicate stock policy)

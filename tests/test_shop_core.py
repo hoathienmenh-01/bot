@@ -512,3 +512,29 @@ class MigrationRegressionTest(unittest.TestCase):
                     migrated.execute("INSERT INTO users(telegram_id, username, full_name, api_key) VALUES('333','b','B','tgb_same')")
         finally:
             tmp.cleanup()
+
+class PaymentHardeningTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.tmp.name) / "shop.db")
+        self.db.init()
+        self.users = UserService(self.db)
+        self.catalog = CatalogService(self.db)
+        self.orders = OrderService(self.db)
+        self.payments = PaymentService(self.db)
+        self.user_id = self.users.get_or_create(12345, "buyer", "Buyer")
+        self.cat_id = self.catalog.add_category("ChatGPT")
+        self.product_id = self.catalog.add_product(category_id=self.cat_id, name="ChatGPT", description="", currency="VND", price_minor=100_000)
+        self.catalog.add_stock(self.product_id, ["acc1", "acc2"])
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_order_payment_intent_reuses_pending_provider_code(self) -> None:
+        order = self.orders.create_order(user_id=self.user_id, product_id=self.product_id)
+        first = self.payments.create_order_payment_intent(order_id=order["id"], provider="bank", expected_user_id=self.user_id)
+        second = self.payments.create_order_payment_intent(order_id=order["id"], provider="bank", expected_user_id=self.user_id)
+        other_provider = self.payments.create_order_payment_intent(order_id=order["id"], provider="binance_pay", expected_user_id=self.user_id)
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(first["public_code"], second["public_code"])
+        self.assertNotEqual(first["public_code"], other_provider["public_code"])

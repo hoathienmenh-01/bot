@@ -37,6 +37,7 @@ from nimo_shop.services.payments import PaymentMatchError, PaymentService
 from nimo_shop.services.preorders import PreorderOwnershipError, PreorderService, PreorderStateError
 from nimo_shop.services.users import UserService
 from nimo_shop.services.wallet import InsufficientFunds, WalletService
+from nimo_shop.services.notifications import NotificationService
 
 
 def build_dispatcher(settings: Settings, db: Database):
@@ -51,7 +52,7 @@ def build_dispatcher(settings: Settings, db: Database):
     users = UserService(db)
     catalog = CatalogService(db)
     orders = OrderService(db, order_expires_minutes=settings.order_expires_minutes)
-    preorders = PreorderService(db, deposit_percent=settings.preorder_deposit_percent)
+    preorders = PreorderService(db, deposit_percent=settings.preorder_deposit_percent, order_expires_minutes=settings.order_expires_minutes)
     wallet = WalletService(db)
     payments = PaymentService(db, deposit_expires_minutes=settings.deposit_expires_minutes)
     finance = FinanceService(db)
@@ -93,10 +94,16 @@ def build_dispatcher(settings: Settings, db: Database):
         rel = str(product.get("product_image_path") or "").strip()
         if not rel:
             return None
-        path = Path(rel)
-        if not path.is_absolute():
-            path = Path.cwd() / path
-        return path if path.exists() and path.is_file() else None
+        candidates = [Path(rel)] if Path(rel).is_absolute() else [Path.cwd() / rel]
+        try:
+            db_root = Path(db.path).resolve().parent.parent
+            candidates.append(db_root / rel)
+        except Exception:
+            pass
+        for path in candidates:
+            if path.exists() and path.is_file():
+                return path
+        return None
 
     async def edit_product_panel(callback, product: dict) -> None:
         text = views.product_detail(product)
@@ -233,6 +240,29 @@ def build_dispatcher(settings: Settings, db: Database):
                     """
                 )
             ]
+
+    def queue_order_notice(order_id: int, *, kind: str, title: str, message_template: str) -> None:
+        try:
+            with db.connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT o.*, p.name AS product_name
+                      FROM orders o JOIN products p ON p.id=o.product_id
+                     WHERE o.id=?
+                    """,
+                    (order_id,),
+                ).fetchone()
+            if row:
+                data = dict(row)
+                NotificationService(db).queue_user_message(
+                    user_id=int(data["user_id"]),
+                    kind=kind,
+                    title=title,
+                    message=message_template.format(**data),
+                    product_id=int(data["product_id"]),
+                )
+        except Exception as exc:
+            print(f"[admin-notice] cannot queue order notice #{order_id}: {exc}")
 
     def user_stats() -> str:
         with db.connect() as conn:
@@ -465,6 +495,26 @@ def build_dispatcher(settings: Settings, db: Database):
         except Exception as exc:
             await message.answer(f"❌ Số tiền nạp không hợp lệ: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
+    @router.message(Command("napusdt", "topupusdt"))
+    async def topup_usdt_command(message: Message):
+        user_id = ensure_user_from_message(message)
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("✍️ Nhập số USDT muốn nạp: <code>/napusdt 7.24</code>", parse_mode="HTML")
+            return
+        try:
+            amount_minor = to_minor(parts[1], "USDT")
+            intent = payments.create_wallet_topup_intent(user_id=user_id, provider="usdt_bep20", currency="USDT", amount_minor=amount_minor)
+            await message.answer(views.usdt_bep20_instruction(intent, address=settings.usdt_bep20_address, tolerance=settings.usdt_bep20_tolerance), parse_mode="HTML")
+            if settings.usdt_bep20_address:
+                await message.answer_photo(
+                    views.usdt_qr_url(settings.usdt_bep20_address),
+                    caption=f"USDT receiving address QR (BEP20):\n<code>{views.h(settings.usdt_bep20_address)}</code>",
+                    parse_mode="HTML",
+                )
+        except Exception as exc:
+            await message.answer(f"❌ Số tiền USDT không hợp lệ: <code>{views.h(exc)}</code>", parse_mode="HTML")
+
     @router.message(Command("mua", "buy"))
     async def buy_quantity_command(message: Message):
         user_id = ensure_user_from_message(message)
@@ -645,6 +695,23 @@ def build_dispatcher(settings: Settings, db: Database):
         try:
             product_id, items = parse_add_stock(message.text or "")
             inserted = catalog.add_stock(product_id, items)
+            if inserted > 0:
+                product = get_product(product_id) or {"name": f"#{product_id}"}
+                NotificationService(db).queue_product_update(
+                    product_id=product_id,
+                    title="Hàng mới đã về",
+                    message=f"📦 <b>Hàng mới đã về</b>\n\nSản phẩm: <b>{views.h(str(product.get('name') or product_id))}</b>\nSố lượng vừa nhập: <b>{inserted}</b>\n\nBấm /start để vào shop và mua ngay.",
+                )
+                ready_orders = preorders.create_payment_orders_for_available_stock(product_id)
+                for order in ready_orders:
+                    remaining = int(order.get("total_amount_minor") or 0)
+                    if str(order.get("status")) == "delivered" or remaining == 0:
+                        msg = f"✅ <b>Sản phẩm đặt trước đã được giao</b>\n\nMã đặt trước: <code>{order.get('preorder_code')}</code>\nĐơn hàng: <code>{order.get('public_code')}</code>. Vào Lịch sử mua để xem/tải lại hàng."
+                        kind = "preorder_delivered"; title = "Đặt trước đã giao hàng"
+                    else:
+                        msg = f"📦 <b>Sản phẩm đặt trước đã có hàng</b>\n\nMã đặt trước: <code>{order.get('preorder_code')}</code>\nĐơn thanh toán phần còn lại: <code>{order.get('public_code')}</code>\nCòn cần thanh toán: <b>{fmt_money(remaining, order.get('currency') or 'VND')}</b>."
+                        kind = "preorder_ready"; title = "Đặt trước đã có hàng"
+                    NotificationService(db).queue_user_message(user_id=int(order["user_id"]), kind=kind, title=title, message=msg, product_id=product_id)
         except Exception as exc:
             await message.answer(f"❌ Không nhập được kho: <code>{views.h(exc)}</code>", parse_mode="HTML")
             return
@@ -667,6 +734,12 @@ def build_dispatcher(settings: Settings, db: Database):
         except Exception as exc:
             await message.answer(f"❌ Không xác nhận được: <code>{views.h(exc)}</code>", parse_mode="HTML")
             return
+        if result.get("intent", {}).get("order_id"):
+            order_id = int(result["intent"]["order_id"])
+            if result.get("status") == "order_delivered":
+                queue_order_notice(order_id, kind="order_delivered", title="Đơn hàng đã giao", message_template="✅ <b>Đơn hàng {public_code} đã được xác nhận thanh toán và giao hàng</b>\n\nSản phẩm: <b>{product_name}</b>.")
+            else:
+                queue_order_notice(order_id, kind="payment_update", title="Cập nhật thanh toán", message_template=f"💳 <b>Thanh toán đơn {{public_code}} đã được cập nhật</b>\n\nTrạng thái mới: {views.h(str(result.get('status')))}")
         await message.answer(f"✅ Đã xử lý thanh toán. Trạng thái: <b>{views.h(result['status'])}</b>", parse_mode="HTML")
 
     @router.message(Command("cancel"))
@@ -675,6 +748,7 @@ def build_dispatcher(settings: Settings, db: Database):
             return
         try:
             order_id = parse_one_int_arg(message.text or "", "/cancel")
+            queue_order_notice(order_id, kind="order_cancelled", title="Đơn hàng đã hủy", message_template="❌ <b>Đơn hàng {public_code} đã bị hủy bởi admin</b>\n\nSản phẩm: <b>{product_name}</b>.")
             orders.cancel_order(order_id, "admin_cancel")
         except Exception as exc:
             await message.answer(f"❌ Không hủy được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
@@ -688,6 +762,7 @@ def build_dispatcher(settings: Settings, db: Database):
         try:
             order_id = parse_one_int_arg(message.text or "", "/refund")
             result = orders.refund_to_wallet(order_id)
+            queue_order_notice(order_id, kind="order_refunded", title="Đơn hàng đã hoàn tiền", message_template="💰 <b>Đơn hàng {public_code} đã được hoàn tiền vào ví</b>\n\nSản phẩm: <b>{product_name}</b>.")
         except Exception as exc:
             await message.answer(f"❌ Không hoàn tiền được: <code>{views.h(exc)}</code>", parse_mode="HTML")
             return
@@ -939,10 +1014,7 @@ def build_dispatcher(settings: Settings, db: Database):
         try:
             intent = payments.create_order_payment_intent(order_id=order_id, provider="binance_pay", expected_user_id=user_id)
             order = orders.get_order(order_id)
-            extra = (
-                "Chuyển Binance Pay/USDT và ghi đúng mã thanh toán trong note/nội dung. "
-                "Admin có thể xác nhận thủ công bằng /confirm nếu chưa cấu hình merchant API."
-            )
+            extra = ""
             if settings.binance_pay_enabled and settings.binance_pay_api_key and settings.binance_pay_secret_key:
                 client = BinancePayClient(BinancePayConfig(
                     api_key=settings.binance_pay_api_key,
@@ -967,11 +1039,37 @@ def build_dispatcher(settings: Settings, db: Database):
                     "✅ Đã tạo Binance Pay merchant order.\n"
                     f"Provider ref: <code>{views.h(provider_ref)}</code>\n"
                     + (f"Link/QR thanh toán: {views.h(pay_link)}\n" if pay_link else "")
-                    + "Khi webhook hoặc admin xác nhận giao dịch, bot sẽ tự giao hàng/cộng ví."
+                    + "Khi webhook/admin xác nhận giao dịch, bot sẽ tự giao hàng/cộng ví."
                 )
-            await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="Binance Pay/USDT", extra=extra))
+                await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="Binance Pay", extra=extra))
+            else:
+                await edit_or_answer_callback(callback, views.binance_id_instruction(intent, binance_id=settings.binance_pay_id, note=settings.binance_pay_note))
         except Exception as exc:
-            await edit_or_answer_callback(callback, f"❌ Không tạo được thanh toán: <code>{views.h(exc)}</code>")
+            await edit_or_answer_callback(callback, f"❌ Không tạo được thanh toán Binance: <code>{views.h(exc)}</code>")
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("payusdt:"))
+    async def cb_pay_usdt(callback: CallbackQuery):
+        user_id = ensure_user_from_callback(callback)
+        order_id = int(callback.data.split(":", 1)[1])
+        try:
+            intent = payments.create_order_payment_intent(order_id=order_id, provider="usdt_bep20", expected_user_id=user_id)
+            await edit_or_answer_callback(callback, views.usdt_bep20_instruction(intent, address=settings.usdt_bep20_address, tolerance=settings.usdt_bep20_tolerance))
+            if settings.usdt_bep20_address:
+                try:
+                    await callback.message.answer_photo(
+                        views.usdt_qr_url(settings.usdt_bep20_address),
+                        caption=(
+                            "USDT receiving address QR (BEP20):\n"
+                            f"<code>{views.h(settings.usdt_bep20_address)}</code>\n"
+                            "Scan to copy the correct wallet address."
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception as exc:
+                    await callback.message.answer(f"⚠️ Không gửi được QR USDT: <code>{views.h(exc)}</code>", parse_mode="HTML")
+        except Exception as exc:
+            await edit_or_answer_callback(callback, f"❌ Không tạo được thanh toán USDT: <code>{views.h(exc)}</code>")
         await callback.answer()
 
     @router.callback_query(F.data.startswith("cancel:"))
@@ -1012,6 +1110,29 @@ def build_dispatcher(settings: Settings, db: Database):
             await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="ngân hàng", extra=extra))
         except Exception as exc:
             await edit_or_answer_callback(callback, f"❌ Không tạo được lệnh nạp: <code>{views.h(exc)}</code>")
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("topupbinance"))
+    async def cb_topup_binance(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        await edit_or_answer_callback(
+            callback,
+            "🟡 <b>Nạp ví qua Binance</b>\n\n"
+            "Gửi lệnh: <code>/napusdt 7.24</code> để tạo mã nạp USDT/Binance theo số tiền tự do.\n"
+            "Sau khi thanh toán, hệ thống/admin xác nhận sẽ cộng vào ví USD/USDT.",
+            reply_markup=wallet_keyboard(),
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("topupusdt"))
+    async def cb_topup_usdt(callback: CallbackQuery):
+        ensure_user_from_callback(callback)
+        await edit_or_answer_callback(
+            callback,
+            "🌕 <b>Nạp ví USDT (BEP20)</b>\n\n"
+            "Gửi lệnh: <code>/napusdt 7.24</code> để tạo mã nạp USDT và nhận địa chỉ/QR BEP20.",
+            reply_markup=wallet_keyboard(),
+        )
         await callback.answer()
 
     @router.callback_query(F.data == "history")

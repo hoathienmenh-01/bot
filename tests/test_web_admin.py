@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import http.cookiejar
 import json
 import re
@@ -17,6 +19,8 @@ from nimo_shop.services.orders import OrderService
 from nimo_shop.services.payments import PaymentService
 from nimo_shop.services.users import UserService
 from nimo_shop.services.notifications import NotificationService
+from nimo_shop.services.preorders import PreorderService
+from nimo_shop.services.wallet import WalletService
 from nimo_shop.web.app import create_server
 from nimo_shop.web.security import create_session, csrf_token, hash_password, read_session, verify_password, verify_csrf
 from nimo_shop.web.service import AdminWebService
@@ -81,7 +85,7 @@ class WebAdminTest(unittest.TestCase):
             admin_id=admin_id,
         )
         self.assertEqual(self.web.get_product(prod_id)["name"], "ChatGPT Plus Premium")
-        self.assertEqual(len(NotificationService(self.db).pending()), 1)
+        self.assertGreaterEqual(len(NotificationService(self.db).pending()), 1)
 
         temp_prod = self.web.create_product(
             {"category_id": str(cat_id), "name": "Temp Product", "currency": "VND", "price": "1000", "cost": "0", "description": "", "warranty_text": ""},
@@ -294,9 +298,11 @@ class WebAdminV21OperationsTest(unittest.TestCase):
                 self.assertIn(marker, page)
             resp = opener.open(base + "/exports/download?kind=orders")
             self.assertEqual(resp.headers.get_content_type(), "text/csv")
+            self.web.update_settings({"WEBHOOK_SHARED_SECRET": "secret123"}, admin_id=self.admin_id)
             payload = urllib.parse.urlencode({"tx_id": "WH1", "amount": "1000", "currency": "VND", "description": "khong co ma"}).encode("utf-8")
-            wh = opener.open(urllib.request.Request(base + "/webhook/sepay", data=payload, method="POST")).read().decode("utf-8")
-            self.assertIn("unmatched", wh)
+            sig = hmac.new(b"secret123", payload, hashlib.sha256).hexdigest()
+            wh = opener.open(urllib.request.Request(base + "/webhook/sepay", data=payload, headers={"X-NIMO-Signature": sig}, method="POST")).read().decode("utf-8")
+            self.assertIn("payment code not found", wh)
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=3)
 
@@ -476,9 +482,14 @@ class WebAdminV25CategoryPreorderTest(unittest.TestCase):
         prod_id = self.web.create_product({"category_id": str(cat_id), "name": "Plus", "currency": "VND", "price": "100000", "cost": "0"}, admin_id=admin_id)
         uid = UserService(self.db).get_or_create(999, "buyer", "Buyer")
         from nimo_shop.services.preorders import PreorderService
-        pr = PreorderService(self.db, 15).create_preorder(user_id=uid, product_id=prod_id, quantity=2)
+        pr_service = PreorderService(self.db, 15)
+        pr = pr_service.create_preorder(user_id=uid, product_id=prod_id, quantity=2)
+        WalletService(self.db).credit(uid, "VND", int(pr["deposit_amount_minor"]), reason="preorder", idempotency_key="preorder-credit")
+        pr_service.pay_deposit_with_wallet(pr["id"], expected_user_id=uid)
+        CatalogService(self.db).add_stock(prod_id, ["pre-a", "pre-b"])
         self.assertEqual(self.web.list_preorders()[0]["id"], pr["id"])
-        self.web.fulfill_preorder(pr["id"], admin_id=admin_id)
+        order = self.web.fulfill_preorder(pr["id"], admin_id=admin_id)
+        self.assertEqual(order["status"], "awaiting_payment")
         self.assertEqual(self.web.list_preorders(status="fulfilled")[0]["id"], pr["id"])
         self.web.update_settings({"PREORDER_DEPOSIT_PERCENT": "15"}, admin_id=admin_id, write_env=True)
         self.assertIn("PREORDER_DEPOSIT_PERCENT=15", (self.root / ".env").read_text(encoding="utf-8"))
@@ -530,3 +541,143 @@ class BuyerApiTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
+
+class WebSecurityAndWebhookRegressionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "shop.db"
+        self.db = Database(self.db_path)
+        self.web = AdminWebService(self.db, project_root=self.root)
+        self.web.init(bootstrap_username="owner", bootstrap_password="StrongPass123")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _serve(self):
+        server = create_server(
+            self.db_path,
+            host="127.0.0.1",
+            port=0,
+            session_secret="test-secret",
+            project_root=self.root,
+            bootstrap_username="owner",
+            bootstrap_password="StrongPass123",
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_sepay_and_binance_webhook_urls_map_to_internal_payment_providers(self) -> None:
+        cat = self.web.create_category("Pay")
+        prod = self.web.create_product({"category_id": str(cat), "name": "Item", "currency": "VND", "price": "100000", "cost": "0", "description": "", "warranty_text": ""})
+        self.web.add_stock(prod, "acc-bank\nacc-binance")
+        user_id = UserService(self.db).get_or_create(888, "buyer", "Buyer")
+        order = OrderService(self.db).create_order(user_id=user_id, product_id=prod, quantity=1)
+        bank_intent = PaymentService(self.db).create_order_payment_intent(order_id=order["id"], provider="bank", expected_user_id=user_id)
+        owner = self.web.authenticate("owner", "StrongPass123")
+        self.web.update_settings({"WEBHOOK_SHARED_SECRET": "secret123"}, admin_id=int(owner["id"]))
+        server, thread, base = self._serve()
+        try:
+            payload = json.dumps({"tx_id": "SEP-TX-1", "amount": "100000", "currency": "VND", "description": bank_intent["public_code"]}).encode("utf-8")
+            sig = hmac.new(b"secret123", payload, hashlib.sha256).hexdigest()
+            response = urllib.request.urlopen(urllib.request.Request(base + "/webhook/sepay", data=payload, headers={"Content-Type": "application/json", "X-NIMO-Signature": sig}, method="POST"))
+            data = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(data["status"], "order_delivered")
+
+            order2 = OrderService(self.db).create_order(user_id=user_id, product_id=prod, quantity=1)
+            binance_intent = PaymentService(self.db).create_order_payment_intent(order_id=order2["id"], provider="binance_pay", expected_user_id=user_id)
+            payload = json.dumps({"tx_id": "BN-TX-1", "amount": "100000", "currency": "VND", "description": binance_intent["public_code"]}).encode("utf-8")
+            sig = hmac.new(b"secret123", payload, hashlib.sha256).hexdigest()
+            response = urllib.request.urlopen(urllib.request.Request(base + "/webhook/binance", data=payload, headers={"Content-Type": "application/json", "X-NIMO-Signature": sig}, method="POST"))
+            data = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(data["status"], "order_delivered")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+
+    def test_webhook_shared_secret_blocks_unsigned_requests_when_configured(self) -> None:
+        owner = self.web.authenticate("owner", "StrongPass123")
+        self.web.update_settings({"WEBHOOK_SHARED_SECRET": "secret123"}, admin_id=int(owner["id"]))
+        cat = self.web.create_category("Pay")
+        prod = self.web.create_product({"category_id": str(cat), "name": "Item", "currency": "VND", "price": "100000", "cost": "0", "description": "", "warranty_text": ""})
+        self.web.add_stock(prod, "acc-secret")
+        user_id = UserService(self.db).get_or_create(889, "buyer", "Buyer")
+        order = OrderService(self.db).create_order(user_id=user_id, product_id=prod, quantity=1)
+        intent = PaymentService(self.db).create_order_payment_intent(order_id=order["id"], provider="bank", expected_user_id=user_id)
+        server, thread, base = self._serve()
+        try:
+            payload = json.dumps({"tx_id": "SEC-TX-1", "amount": "100000", "currency": "VND", "description": intent["public_code"]}).encode("utf-8")
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(urllib.request.Request(base + "/webhook/sepay", data=payload, headers={"Content-Type": "application/json"}, method="POST"))
+            self.assertEqual(cm.exception.code, 401)
+            sig = hmac.new(b"secret123", payload, hashlib.sha256).hexdigest()
+            response = urllib.request.urlopen(urllib.request.Request(base + "/webhook/sepay", data=payload, headers={"Content-Type": "application/json", "X-NIMO-Signature": sig}, method="POST"))
+            data = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(data["status"], "order_delivered")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_non_owner_admin_roles_cannot_access_or_write_owner_settings(self) -> None:
+        owner = self.web.authenticate("owner", "StrongPass123")
+        self.web.create_admin_account(username="finance", password="FinancePass123", role="finance", admin_id=int(owner["id"]))
+        server, thread, base = self._serve()
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        try:
+            opener.open(base + "/login").read()
+            login = urllib.parse.urlencode({"username": "finance", "password": "FinancePass123"}).encode("utf-8")
+            opener.open(urllib.request.Request(base + "/login", data=login, method="POST"))
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                opener.open(base + "/settings")
+            self.assertEqual(cm.exception.code, 403)
+
+            finance_page = opener.open(base + "/payments").read().decode("utf-8")
+            csrf = re.search(r'name="csrf" value="([a-f0-9]+)"', finance_page).group(1)
+            forbidden_post = urllib.parse.urlencode({"csrf": csrf, "SHOP_NAME": "BAD"}).encode("utf-8")
+            with self.assertRaises(urllib.error.HTTPError) as cm2:
+                opener.open(urllib.request.Request(base + "/settings", data=forbidden_post, method="POST"))
+            self.assertEqual(cm2.exception.code, 403)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+
+class V28CommercialHardeningTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.tmp.name) / "shop.db")
+        self.web = AdminWebService(self.db, project_root=self.tmp.name)
+        self.web.init(bootstrap_username="owner", bootstrap_password="StrongPass123")
+        self.admin = self.web.authenticate("owner", "StrongPass123")
+        self.admin_id = int(self.admin["id"])
+        self.user_id = UserService(self.db).get_or_create(123456, "buyer", "Buyer")
+        self.cat_id = self.web.create_category("ChatGPT", admin_id=self.admin_id)
+        self.prod_id = self.web.create_product({"category_id": str(self.cat_id), "name": "Zero", "currency": "VND", "price": "0", "cost": "0", "description": "demo", "warranty_text": "test"}, admin_id=self.admin_id)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_zero_price_order_does_not_debit_wallet_crash(self) -> None:
+        self.web.add_stock(self.prod_id, "free-key", admin_id=self.admin_id)
+        orders = OrderService(self.db, order_expires_minutes=15)
+        order = orders.create_order(user_id=self.user_id, product_id=self.prod_id, quantity=1)
+        paid = orders.pay_with_wallet(order["id"], expected_user_id=self.user_id)
+        self.assertEqual(paid["order"]["status"], "delivered")
+        self.assertEqual(len(paid["delivery"]), 1)
+
+    def test_stock_import_broadcasts_and_creates_preorder_remaining_order(self) -> None:
+        # Product has no stock, so buyer places and pays a preorder deposit.
+        pre = PreorderService(self.db, deposit_percent=10).create_preorder(user_id=self.user_id, product_id=self.prod_id, quantity=1)
+        PreorderService(self.db, deposit_percent=10).pay_deposit_with_wallet(pre["id"], expected_user_id=self.user_id)
+        inserted = self.web.add_stock(self.prod_id, "preorder-key", admin_id=self.admin_id)
+        self.assertEqual(inserted, 1)
+        notes = NotificationService(self.db).pending()
+        kinds = {n["kind"] for n in notes}
+        self.assertIn("product_update", kinds)
+        self.assertIn("preorder_delivered", kinds)

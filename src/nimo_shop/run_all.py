@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -24,6 +25,9 @@ def main() -> None:
     parser.add_argument("--username", default=os.getenv("WEB_ADMIN_USERNAME", "admin"))
     parser.add_argument("--password", default=os.getenv("WEB_ADMIN_PASSWORD") or None)
     args = parser.parse_args()
+    if not args.password:
+        args.password = secrets.token_urlsafe(12)
+    session_secret = os.getenv("WEB_SESSION_SECRET") or secrets.token_urlsafe(32)
 
     settings = Settings.from_env()
     db = Database(args.db)
@@ -33,7 +37,7 @@ def main() -> None:
         args.db,
         host=args.host,
         port=args.port,
-        session_secret=os.getenv("WEB_SESSION_SECRET"),
+        session_secret=session_secret,
         project_root=Path.cwd(),
         bootstrap_username=args.username,
         bootstrap_password=args.password,
@@ -41,6 +45,8 @@ def main() -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="nimo-web-admin")
     thread.start()
     print(f"NIMO Web Admin đang chạy: http://127.0.0.1:{args.port}")
+    print(f"Tài khoản setup: {args.username} / {args.password}")
+    print("Hãy lưu WEB_ADMIN_PASSWORD và WEB_SESSION_SECRET cố định trong .env trước khi mở public.")
     if args.host not in {"127.0.0.1", "localhost"}:
         print(f"Mở từ máy khác cùng WiFi: http://<IP_MAY_CHAY_BOT>:{args.port}")
 
