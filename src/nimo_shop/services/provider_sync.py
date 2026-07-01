@@ -85,8 +85,9 @@ def normalize_pay2s_transaction(tx: dict[str, Any]) -> dict[str, Any]:
     return _normalize_bank_transaction(tx, source="pay2s")
 
 
-def _apply_transactions(payment_service: PaymentService, transactions: list[dict[str, Any]], *, normalizer) -> dict[str, int]:
+def _apply_transactions_detailed(payment_service: PaymentService, transactions: list[dict[str, Any]], *, normalizer) -> dict[str, Any]:
     summary = {"processed": 0, "duplicates": 0, "unmatched": 0, "invalid": 0, "applied": 0}
+    results: list[dict[str, Any]] = []
     for tx in transactions:
         try:
             normalized = normalizer(tx)
@@ -94,14 +95,23 @@ def _apply_transactions(payment_service: PaymentService, transactions: list[dict
             summary["processed"] += 1
             if result["status"] == "duplicate":
                 summary["duplicates"] += 1
+                outcome = "duplicate"
             else:
                 summary["applied"] += 1
-        except PaymentMatchError:
+                outcome = "applied"
+            results.append({"outcome": outcome, "transaction": tx, "normalized": normalized, "result": result})
+        except PaymentMatchError as exc:
             summary["processed"] += 1
             summary["unmatched"] += 1
-        except Exception:
+            results.append({"outcome": "unmatched", "transaction": tx, "error": str(exc)})
+        except Exception as exc:
             summary["invalid"] += 1
-    return summary
+            results.append({"outcome": "invalid", "transaction": tx, "error": str(exc)})
+    return {"summary": summary, "results": results}
+
+
+def _apply_transactions(payment_service: PaymentService, transactions: list[dict[str, Any]], *, normalizer) -> dict[str, int]:
+    return dict(_apply_transactions_detailed(payment_service, transactions, normalizer=normalizer)["summary"])
 
 
 def apply_sepay_transactions(payment_service: PaymentService, transactions: list[dict[str, Any]]) -> dict[str, int]:
@@ -112,3 +122,13 @@ def apply_sepay_transactions(payment_service: PaymentService, transactions: list
 def apply_pay2s_transactions(payment_service: PaymentService, transactions: list[dict[str, Any]]) -> dict[str, int]:
     """Apply Pay2S transaction API/webhook rows safely and idempotently."""
     return _apply_transactions(payment_service, transactions, normalizer=normalize_pay2s_transaction)
+
+
+def apply_sepay_transactions_detailed(payment_service: PaymentService, transactions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Apply SePay rows and include per-transaction results for Telegram notifications."""
+    return _apply_transactions_detailed(payment_service, transactions, normalizer=normalize_sepay_transaction)
+
+
+def apply_pay2s_transactions_detailed(payment_service: PaymentService, transactions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Apply Pay2S rows and include per-transaction results for Telegram notifications."""
+    return _apply_transactions_detailed(payment_service, transactions, normalizer=normalize_pay2s_transaction)

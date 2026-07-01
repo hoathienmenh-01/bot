@@ -12,7 +12,8 @@ from nimo_shop.payments.pay2s import Pay2SClient, Pay2SConfig
 from nimo_shop.payments.sepay import SepayClient
 from nimo_shop.services.bank_accounts import BankAccountService
 from nimo_shop.services.payments import PaymentService
-from nimo_shop.services.provider_sync import apply_pay2s_transactions, apply_sepay_transactions
+from nimo_shop.money import fmt_money
+from nimo_shop.services.provider_sync import apply_pay2s_transactions_detailed, apply_sepay_transactions_detailed
 from nimo_shop.services.notifications import NotificationService
 
 _TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{20,}$")
@@ -89,16 +90,58 @@ def _runtime_bool(db: Database, key: str, fallback: bool = False) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-async def sepay_poll_loop(settings: Settings, payments: PaymentService, db: Database) -> None:
+async def _notify_provider_payment(bot, db: Database, applied: dict) -> None:
+    """Notify the buyer after a bank provider transaction is actually applied.
+
+    Before this fix the wallet/order was processed silently by the background
+    poller, so customers thought bank/Pay2S auto payment was broken because no
+    Telegram message was sent after the transfer.
+    """
+    if applied.get("outcome") != "applied":
+        return
+    result = applied.get("result") or {}
+    intent = result.get("intent") or {}
+    user_id = intent.get("user_id")
+    if not user_id:
+        return
+    try:
+        with db.connect() as conn:
+            user = conn.execute("SELECT telegram_id FROM users WHERE id=?", (int(user_id),)).fetchone()
+        if not user:
+            return
+        status = str(result.get("status") or "confirmed")
+        amount_text = fmt_money(int(intent.get("amount_minor") or 0), str(intent.get("currency") or "VND"))
+        code = str(intent.get("public_code") or "")
+        if status == "order_delivered":
+            text = (
+                "✅ <b>Đã xác nhận chuyển khoản thành công</b>\n\n"
+                f"Mã thanh toán: <code>{code}</code>\n"
+                f"Số tiền: <b>{amount_text}</b>\n"
+                "Đơn hàng đã được thanh toán và giao hàng tự động. Bấm /taidon để tải lại hàng nếu cần."
+            )
+        else:
+            balance = result.get("balance_after_minor")
+            balance_text = ""
+            if balance is not None:
+                balance_text = f"\nSố dư sau cộng: <b>{fmt_money(int(balance), str(intent.get('currency') or 'VND'))}</b>"
+            text = (
+                "✅ <b>Đã nhận chuyển khoản và cộng vào ví</b>\n\n"
+                f"Mã nạp: <code>{code}</code>\n"
+                f"Số tiền: <b>{amount_text}</b>"
+                f"{balance_text}"
+            )
+        await bot.send_message(int(user["telegram_id"]), text, parse_mode="HTML")
+    except Exception as exc:  # pragma: no cover - Telegram runtime only
+        print(f"[bank-sync] cannot notify payment result: {exc}")
+
+
+async def sepay_poll_loop(settings: Settings, payments: PaymentService, db: Database, bot=None) -> None:
     while True:
         poll_seconds = 10
         try:
             bank_enabled = _runtime_bool(db, "BANK_ENABLED", settings.bank_enabled)
             legacy_poll_seconds = max(5, int(_runtime_setting(db, "SEPAY_POLL_SECONDS", settings.sepay_poll_seconds) or settings.sepay_poll_seconds))
             poll_seconds = legacy_poll_seconds
-            if not bank_enabled:
-                await asyncio.sleep(min(poll_seconds, 10))
-                continue
 
             account_service = BankAccountService(db)
             accounts = [
@@ -106,14 +149,16 @@ async def sepay_poll_loop(settings: Settings, payments: PaymentService, db: Data
                 if str(a.get("provider") or "").lower() in {"sepay", "pay2s"} and str(a.get("api_key") or "").strip()
             ]
 
-            # Backward compatibility: if the owner has not created multi-bank
-            # accounts yet, keep using the old single SEPAY_API_KEY setting.
-            if not accounts:
+            # Multi-bank accounts have their own enabled switch. Do not require
+            # the legacy BANK_ENABLED flag, otherwise a correctly configured
+            # Pay2S/SePay account never polls if the old single-bank switch is off.
+            if not accounts and bank_enabled:
                 api_key = _runtime_setting(db, "SEPAY_API_KEY", settings.sepay_api_key)
-                if not api_key:
-                    await asyncio.sleep(min(poll_seconds, 10))
-                    continue
-                accounts = [{"id": "legacy", "label": "Legacy SePay", "provider": "sepay", "api_key": api_key, "base_url": "", "poll_seconds": legacy_poll_seconds}]
+                if api_key:
+                    accounts = [{"id": "legacy", "label": "Legacy SePay", "provider": "sepay", "api_key": api_key, "base_url": "", "poll_seconds": legacy_poll_seconds}]
+            if not accounts:
+                await asyncio.sleep(min(poll_seconds, 10))
+                continue
 
             combined = {"processed": 0, "duplicates": 0, "unmatched": 0, "invalid": 0, "applied": 0}
             for account in accounts:
@@ -128,17 +173,21 @@ async def sepay_poll_loop(settings: Settings, payments: PaymentService, db: Data
                         base_url=str(account.get("base_url") or "https://api.pay2s.vn/userapi"),
                     ))
                     transactions = await asyncio.to_thread(client.list_transactions, days=2)
-                    apply_fn = apply_pay2s_transactions
+                    apply_fn = apply_pay2s_transactions_detailed
                 else:
                     client = SepayClient(str(account.get("api_key") or ""), base_url=str(account.get("base_url") or "https://my.sepay.vn/userapi"))
                     transactions = await asyncio.to_thread(client.list_transactions, limit=50)
-                    apply_fn = apply_sepay_transactions
+                    apply_fn = apply_sepay_transactions_detailed
                 for tx in transactions:
                     item = dict(tx)
                     item["_bank_account_id"] = str(account.get("id") or "legacy")
                     item["_bank_account_label"] = str(account.get("label") or "")
                     tagged_transactions.append(item)
-                summary = apply_fn(payments, tagged_transactions)
+                detailed = apply_fn(payments, tagged_transactions)
+                summary = detailed.get("summary", {})
+                for item in detailed.get("results", []):
+                    if bot is not None:
+                        await _notify_provider_payment(bot, db, item)
                 for key in combined:
                     combined[key] += int(summary.get(key) or 0)
             if combined.get("applied") or combined.get("unmatched") or combined.get("invalid"):
@@ -268,7 +317,7 @@ async def amain(*, setup_web_on_invalid_token: bool = True) -> None:
     # Always start the SePay watcher. It reads live Admin settings from DB each
     # cycle, so enabling BANK/SEPAY in Web Admin takes effect after restart even
     # when the owner did not write those values to .env.
-    background_tasks.append(asyncio.create_task(sepay_poll_loop(settings, PaymentService(db, settings.deposit_expires_minutes), db)))
+    background_tasks.append(asyncio.create_task(sepay_poll_loop(settings, PaymentService(db, settings.deposit_expires_minutes), db, bot)))
     background_tasks.append(asyncio.create_task(notification_send_loop(bot, db)))
     background_tasks.append(asyncio.create_task(expired_order_notify_loop(bot, db, settings)))
     try:

@@ -13,6 +13,7 @@ from nimo_shop.db import Database
 from nimo_shop.config import Settings
 from nimo_shop.money import to_minor
 from nimo_shop.payments.binance_pay import BinancePayClient, BinancePayConfig
+from nimo_shop.payments.pay2s import Pay2SClient, Pay2SConfig
 from nimo_shop.payments.sepay import BankAccount, bank_instruction, vietqr_url
 from nimo_shop.services.bank_accounts import BankAccountService
 from nimo_shop.services.payments import PaymentService
@@ -147,6 +148,38 @@ class PaymentClientHelpersTest(unittest.TestCase):
             # First payment confirms the intent, second real payment with same code
             # becomes an extra wallet credit instead of being ignored as duplicate.
             self.assertEqual(WalletService(db).get_balances(user_id)["VND"], 200_000)
+
+
+    def test_pay2s_client_extracts_nested_transaction_payloads(self) -> None:
+        payloads = [
+            {"transactions": [{"id": 1}]},
+            {"data": {"transactions": [{"id": 2}]}},
+            {"data": {"items": [{"id": 3}]}},
+            {"records": [{"id": 4}]},
+            [{"id": 5}],
+        ]
+        client = Pay2SClient(Pay2SConfig(token="token"))
+        self.assertEqual([client._extract_transactions(p)[0]["id"] for p in payloads], [1, 2, 3, 4, 5])
+
+    def test_pay2s_auto_payment_matches_bank_intent_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "shop.db")
+            db.init()
+            user_id = UserService(db).get_or_create(567890, "pay2s", "Pay2S User")
+            intent = PaymentService(db).create_wallet_topup_intent(user_id=user_id, provider="bank", currency="VND", amount_minor=120_000)
+            tx = {
+                "id": "pay2s-row-1",
+                "transaction_id": "MBB-888",
+                "account_number": "24301999999",
+                "bank": "MBB",
+                "amount": 120000,
+                "description": f"QR - {intent['public_code']} GD 001",
+                "type": "IN",
+                "_bank_account_id": 11,
+            }
+            summary = apply_pay2s_transactions(PaymentService(db), [tx])
+            self.assertEqual(summary["applied"], 1)
+            self.assertEqual(WalletService(db).get_balances(user_id)["VND"], 120_000)
 
     def test_pay2s_transactions_are_normalized_and_applied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

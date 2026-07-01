@@ -1152,16 +1152,16 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return "/payments"
         if path == "/bank-accounts/create":
             self.service.create_bank_account(form, admin_id=admin_id)
-            return "/bank-accounts"
+            return str(form.get("return_to") or "/bank-accounts")
         if path == "/bank-accounts/update":
             self.service.update_bank_account(int(form["id"]), form, admin_id=admin_id)
-            return "/bank-accounts"
+            return str(form.get("return_to") or "/bank-accounts")
         if path == "/bank-accounts/delete":
             self.service.delete_bank_account(int(form["id"]), admin_id=admin_id)
-            return "/bank-accounts"
+            return str(form.get("return_to") or "/bank-accounts")
         if path == "/bank-accounts/default":
             self.service.set_default_bank_account(int(form["id"]), admin_id=admin_id)
-            return "/bank-accounts"
+            return str(form.get("return_to") or "/bank-accounts")
         if path == "/bots/create":
             self.service.create_managed_bot(form, admin_id=admin_id)
             return "/bots"
@@ -1477,17 +1477,27 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             f'<div class="bank-template-grid">{presets}</div>'
             f'<div class="bank-template-grid">{rows}</div>'
         )
+    def _masked_secret_label(self, value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "Chưa lưu"
+        if len(text) <= 8:
+            return "Đã lưu: " + "•" * len(text)
+        return "Đã lưu: " + text[:4] + "…" + text[-4:]
 
-    def _bank_account_form(self, *, action: str, submit_label: str, account: dict[str, Any] | None = None) -> str:
+
+    def _bank_account_form(self, *, action: str, submit_label: str, account: dict[str, Any] | None = None, return_to: str = "/bank-accounts") -> str:
         account = account or {}
         hidden_id = f'<input type="hidden" name="id" value="{int(account["id"])}">' if account.get("id") else ""
         provider = str(account.get("provider") or "sepay")
         api_hint = "Đã lưu - để trống nếu không đổi" if str(account.get("api_key") or "") else "API key/token của provider này"
+        api_key_state = self._masked_secret_label(account.get("api_key"))
+        api_secret_state = self._masked_secret_label(account.get("api_secret"))
         enabled_checked = "checked" if bool(account.get("is_enabled", True)) else ""
         default_checked = "checked" if bool(account.get("is_default", False)) else ""
         return f'''
         <form method="post" action="{action}" class="form-grid bank-form">
-          {self._form_csrf()}{hidden_id}
+          {self._form_csrf()}{hidden_id}<input type="hidden" name="return_to" value="{esc(return_to)}">
           {self._bank_preset_select()}
           <label>Tên hiển thị<input name="label" value="{esc(account.get('label') or '')}" required placeholder="MB Bank chính / VCB dự phòng"></label>
           <label>Tên ngân hàng<input name="bank_name" value="{esc(account.get('bank_name') or '')}" required placeholder="MB Bank / Vietcombank / ACB"></label>
@@ -1495,8 +1505,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
           <label>Số tài khoản nhận tiền<input name="account_no" value="{esc(account.get('account_no') or '')}" required placeholder="Số tài khoản khách chuyển vào"></label>
           <label>Chủ tài khoản<input name="account_name" value="{esc(account.get('account_name') or '')}" required placeholder="PHAM XUAN TOI"></label>
           <label>Provider API quét giao dịch<select name="provider">{self._bank_provider_options(provider)}</select><div class="help">SePay và Pay2S = tự quét đang hỗ trợ sẵn. Casso/custom = lưu API riêng để tích hợp adapter hoặc xác nhận thủ công.</div></label>
-          <label>API key / Access token<input type="password" name="api_key" placeholder="{esc(api_hint)}"><div class="help">SePay: nhập Bearer API key SePay. Pay2S: nhập pay2s-token của Pay2S. Không nhập mật khẩu internet banking.</div></label>
-          <label>API secret / Webhook token<input type="password" name="api_secret" placeholder="Pay2S webhook token hoặc client secret nếu provider cần"><div class="help">Pay2S webhook gửi Authorization: Bearer &lt;token&gt;; dán token đó ở đây nếu dùng /webhook/pay2s.</div></label>
+          <label>API key / Access token<input type="password" name="api_key" placeholder="{esc(api_hint)}"><div class="help">{esc(api_key_state)}. SePay: nhập Bearer API key SePay. Pay2S: nhập pay2s-token của Pay2S. Để trống khi sửa nếu không muốn đổi.</div></label>
+          <label>API secret / Webhook token<input type="password" name="api_secret" placeholder="Pay2S webhook token hoặc client secret nếu provider cần"><div class="help">{esc(api_secret_state)}. Pay2S webhook gửi Authorization: Bearer &lt;token&gt;; dán token đó ở đây nếu dùng /webhook/pay2s. Để trống khi sửa nếu không muốn đổi.</div></label>
           <label>Base URL / Endpoint API<input name="base_url" value="{esc(account.get('base_url') or '')}" placeholder="Để trống dùng mặc định SePay/Pay2S, hoặc nhập endpoint custom"></label>
           <label>Chu kỳ quét giây<input name="poll_seconds" value="{int(account.get('poll_seconds') or 30)}" placeholder="30"></label>
           <label class="checkbox-row"><input type="checkbox" name="is_enabled" {enabled_checked}> Bật tài khoản này</label>
@@ -1517,7 +1527,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             <details class="setup-section" {open_attr}>
               <summary><span>🏦 {esc(b.get('label') or b.get('bank_name'))} · {esc(b.get('account_no'))}</span><span class="pill">{esc(state)} · {esc(auto)}</span></summary>
               <div class="setup-content">
-                {self._bank_account_form(action="/bank-accounts/update", submit_label="Lưu tài khoản", account=b)}
+                {self._bank_account_form(action="/bank-accounts/update", submit_label="Lưu tài khoản", account=b, return_to="/settings" if compact else "/bank-accounts")}
                 <div class="action-row" style="margin-top:12px">
                   <form method="post" action="/bank-accounts/default">{self._form_csrf()}<input type="hidden" name="id" value="{int(b['id'])}"><button class="secondary small">Đặt mặc định</button></form>
                   <form method="post" action="/bank-accounts/delete" onsubmit="return confirm('Xóa tài khoản ngân hàng này?');">{self._form_csrf()}<input type="hidden" name="id" value="{int(b['id'])}"><button class="danger small">Xóa</button></form>
@@ -1533,7 +1543,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         <div class="card"><div class="section-head"><div><h2>{title}</h2><p class="muted">{desc}</p></div><a class="btn secondary" href="/payments">Xem giao dịch</a></div>
         {self._bank_provider_help()}
         </div>
-        <div class="card"><h3>{create_title}</h3>{self._bank_account_form(action="/bank-accounts/create", submit_label="Thêm tài khoản")}</div>
+        <div class="card"><h3>{create_title}</h3>{self._bank_account_form(action="/bank-accounts/create", submit_label="Thêm tài khoản", return_to="/settings" if compact else "/bank-accounts")}</div>
         <div class="card"><h3>Danh sách tài khoản</h3>{empty}{''.join(rows)}</div>
         '''
 

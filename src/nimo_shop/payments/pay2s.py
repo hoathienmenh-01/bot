@@ -54,5 +54,40 @@ class Pay2SClient:
         )
         with request.urlopen(req, timeout=20) as resp:  # nosec - fixed provider URL by default
             payload = json.loads(resp.read().decode("utf-8"))
-        transactions = payload.get("transactions") or payload.get("data") or []
-        return transactions if isinstance(transactions, list) else []
+        return self._extract_transactions(payload)
+
+    @staticmethod
+    def _extract_transactions(payload: object) -> list[dict]:
+        """Return transaction rows from Pay2S responses without assuming one shape.
+
+        Pay2S' documented history API returns `{transactions:[...]}`, but some
+        accounts/proxy versions wrap rows in `data.transactions`, `data.items`,
+        `records` or return the list directly. Being permissive here prevents
+        a successful Pay2S response from being treated as an empty transaction
+        list, which was the reason auto top-up looked dead while Pay2S already
+        had the transfer.
+        """
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        if not isinstance(payload, dict):
+            return []
+        candidates = [
+            payload.get("transactions"),
+            payload.get("data"),
+            payload.get("items"),
+            payload.get("records"),
+            payload.get("results"),
+        ]
+        data = payload.get("data")
+        if isinstance(data, dict):
+            candidates.extend([
+                data.get("transactions"),
+                data.get("items"),
+                data.get("records"),
+                data.get("results"),
+                data.get("list"),
+            ])
+        for value in candidates:
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+        return []
