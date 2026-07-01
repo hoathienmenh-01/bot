@@ -180,3 +180,73 @@ class CommercialHardeningRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_database_init_migrates_orders_preorder_id_before_schema_indexes(tmp_path):
+    """Old commercial databases lacked orders.preorder_id.
+
+    SCHEMA now creates an index on that column, so init() must add the column
+    before executescript(SCHEMA) runs; otherwise startup fails with
+    sqlite3.OperationalError: no such column: preorder_id.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "old_shop.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id TEXT NOT NULL UNIQUE,
+            username TEXT,
+            full_name TEXT,
+            language TEXT NOT NULL DEFAULT 'vi',
+            is_banned INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 100,
+            is_active INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category_id INTEGER,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            currency TEXT NOT NULL DEFAULT 'VND',
+            price_minor INTEGER NOT NULL CHECK(price_minor >= 0),
+            warranty_text TEXT NOT NULL DEFAULT '',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            cost_minor INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            public_code TEXT NOT NULL UNIQUE,
+            user_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL CHECK(quantity > 0),
+            currency TEXT NOT NULL,
+            unit_amount_minor INTEGER NOT NULL CHECK(unit_amount_minor >= 0),
+            total_amount_minor INTEGER NOT NULL CHECK(total_amount_minor >= 0),
+            status TEXT NOT NULL CHECK(status IN ('awaiting_payment','paid','delivered','cancelled','refunded')),
+            payment_method TEXT,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            paid_at TEXT,
+            delivered_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(product_id) REFERENCES products(id)
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    db.init()
+    with db.connect() as conn:
+        cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(orders)")}
+    assert "preorder_id" in cols

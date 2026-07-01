@@ -156,6 +156,8 @@ class WebAdminTest(unittest.TestCase):
             opener.open(urllib.request.Request(base + "/login", data=data, method="POST"))
             dashboard = opener.open(base + "/").read().decode("utf-8")
             self.assertIn("NIMO", dashboard)
+            self.assertIn('class="nav-group"', dashboard)
+            self.assertIn('data-nav-group="', dashboard)
             categories_page = opener.open(base + "/categories").read().decode("utf-8")
             csrf = re.search(r'name="csrf" value="([a-f0-9]+)"', categories_page)
             self.assertIsNotNone(csrf)

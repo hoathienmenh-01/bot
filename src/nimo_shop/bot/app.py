@@ -368,6 +368,45 @@ def build_dispatcher(settings: Settings, db: Database):
         if amount_minor <= 0:
             await message.answer("❌ Số USDT nạp phải lớn hơn 0.")
             return
+        # If Binance Pay merchant API is configured, create a real Binance Pay
+        # order so webhook confirmation can credit the wallet automatically.
+        if settings.binance_pay_enabled and settings.binance_pay_api_key and settings.binance_pay_secret_key:
+            intent = payments.create_wallet_topup_intent(user_id=user_id, provider="binance_pay", currency="USDT", amount_minor=amount_minor)
+            try:
+                client = BinancePayClient(BinancePayConfig(
+                    api_key=settings.binance_pay_api_key,
+                    secret_key=settings.binance_pay_secret_key,
+                    base_url=settings.binance_pay_base_url,
+                ))
+                amount = format(from_minor(int(intent["amount_minor"]), intent["currency"]), "f")
+                payload = client.create_order_payload(
+                    merchant_trade_no=intent["public_code"],
+                    product_name=f"NIMO wallet topup {intent['public_code']}",
+                    amount=amount,
+                    currency="USDT",
+                    return_url=settings.binance_pay_return_url or None,
+                    webhook_url=settings.binance_pay_webhook_url or None,
+                )
+                response = await asyncio.to_thread(client.create_order, payload)
+                data = response.get("data") or {}
+                provider_ref = str(data.get("prepayId") or data.get("universalUrl") or data.get("checkoutUrl") or intent["public_code"])
+                payments.attach_provider_reference(intent_id=int(intent["id"]), provider_ref=provider_ref, metadata={"binance_create_order_response": response})
+                pay_link = data.get("universalUrl") or data.get("checkoutUrl") or data.get("qrcodeLink") or data.get("deeplink")
+                extra = (
+                    "✅ Đã tạo Binance Pay merchant order.\n"
+                    f"Mã nạp: <code>{views.h(intent['public_code'])}</code>\n"
+                    f"Provider ref: <code>{views.h(provider_ref)}</code>\n"
+                    + (f"Link/QR thanh toán: {views.h(pay_link)}\n" if pay_link else "")
+                    + "Khi Binance gọi webhook về hệ thống, ví USDT sẽ được cộng tự động."
+                )
+                await message.answer(views.payment_instruction(intent, provider_label="Binance Pay", extra=extra), parse_mode="HTML")
+                return
+            except Exception as exc:
+                await message.answer(
+                    f"⚠️ Không tạo được Binance Pay tự động: <code>{views.h(exc)}</code>\n"
+                    "Chuyển sang hướng dẫn Binance ID thủ công.",
+                    parse_mode="HTML",
+                )
         intent = payments.create_wallet_topup_intent(user_id=user_id, provider="binance_manual", currency="USDT", amount_minor=amount_minor)
         await message.answer(
             views.binance_id_instruction(
@@ -483,7 +522,10 @@ def build_dispatcher(settings: Settings, db: Database):
                 currency=intent["currency"],
                 add_info=intent["public_code"],
             )
-            return f"<pre>{views.h(instruction)}</pre>\n\nQR VietQR: {views.h(qr)}", qr
+            # Do not include the VietQR URL in the text body. Telegram sends the
+            # QR as a photo right below; including the URL here made the QR appear
+            # twice and confused customers during bank top-up.
+            return f"<pre>{views.h(instruction)}</pre>", qr
         return "Admin chưa cấu hình BANK_BIN/BANK_ACCOUNT/BANK_OWNER. Hãy chuyển khoản theo hướng dẫn admin và ghi đúng mã thanh toán.", None
 
     @router.message(CommandStart())

@@ -255,8 +255,27 @@ class Database:
 
     def init(self) -> None:
         with self.connect() as conn:
+            # Existing SQLite databases may miss columns that are referenced by
+            # indexes in SCHEMA. Add those columns before executescript runs so
+            # CREATE INDEX IF NOT EXISTS does not fail during commercial upgrades.
+            self._pre_schema_migrate(conn)
             conn.executescript(SCHEMA)
             self._migrate(conn)
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _pre_schema_migrate(conn: sqlite3.Connection) -> None:
+        if Database._table_exists(conn, "orders"):
+            order_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(orders)")}
+            if "preorder_id" not in order_cols:
+                conn.execute("ALTER TABLE orders ADD COLUMN preorder_id INTEGER")
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:

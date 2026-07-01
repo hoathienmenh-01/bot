@@ -61,21 +61,50 @@ async def notification_send_loop(bot, db: Database) -> None:
                     print(f"[notify] failed notification #{item['id']}: {error}")
         except Exception as exc:  # pragma: no cover - runtime logging only
             print(f"[notify] loop error: {exc}")
-        await asyncio.sleep(15)
+        await asyncio.sleep(2)  # responsive admin notifications
 
 
-async def sepay_poll_loop(settings: Settings, payments: PaymentService) -> None:
-    client = SepayClient(settings.sepay_api_key)
+def _runtime_setting(db: Database, key: str, fallback: object = "") -> str:
+    """Read app_settings first, then .env/runtime Settings fallback.
+
+    Web Admin stores bank/SePay keys in app_settings and only writes .env when
+    the owner ticks that option. The automatic SePay poller must therefore read
+    the DB as the live source of truth, otherwise auto top-up stays disabled
+    after configuration in the Admin panel.
+    """
+    try:
+        with db.connect() as conn:
+            row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+            if row and str(row["value"] or "").strip() != "":
+                return str(row["value"]).strip()
+    except Exception:
+        pass
+    return str(fallback or "").strip()
+
+
+def _runtime_bool(db: Database, key: str, fallback: bool = False) -> bool:
+    value = _runtime_setting(db, key, "true" if fallback else "false").lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+async def sepay_poll_loop(settings: Settings, payments: PaymentService, db: Database) -> None:
     while True:
+        poll_seconds = 10
         try:
+            bank_enabled = _runtime_bool(db, "BANK_ENABLED", settings.bank_enabled)
+            api_key = _runtime_setting(db, "SEPAY_API_KEY", settings.sepay_api_key)
+            poll_seconds = max(5, int(_runtime_setting(db, "SEPAY_POLL_SECONDS", settings.sepay_poll_seconds) or settings.sepay_poll_seconds))
+            if not (bank_enabled and api_key):
+                await asyncio.sleep(min(poll_seconds, 10))
+                continue
+            client = SepayClient(api_key)
             transactions = await asyncio.to_thread(client.list_transactions, limit=50)
             summary = apply_sepay_transactions(payments, transactions)
-            if summary.get("applied") or summary.get("unmatched"):
+            if summary.get("applied") or summary.get("unmatched") or summary.get("invalid"):
                 print(f"[sepay] {summary}")
         except Exception as exc:  # pragma: no cover - runtime logging only
             print(f"[sepay] polling error: {exc}")
-        await asyncio.sleep(max(10, int(settings.sepay_poll_seconds)))
-
+        await asyncio.sleep(poll_seconds)
 
 
 async def expired_order_notify_loop(bot, db: Database, settings: Settings) -> None:
@@ -195,8 +224,10 @@ async def amain(*, setup_web_on_invalid_token: bool = True) -> None:
     await set_default_bot_commands(bot)
     dp = build_dispatcher(settings, db)
     background_tasks = []
-    if settings.bank_enabled and settings.sepay_api_key:
-        background_tasks.append(asyncio.create_task(sepay_poll_loop(settings, PaymentService(db, settings.deposit_expires_minutes))))
+    # Always start the SePay watcher. It reads live Admin settings from DB each
+    # cycle, so enabling BANK/SEPAY in Web Admin takes effect after restart even
+    # when the owner did not write those values to .env.
+    background_tasks.append(asyncio.create_task(sepay_poll_loop(settings, PaymentService(db, settings.deposit_expires_minutes), db)))
     background_tasks.append(asyncio.create_task(notification_send_loop(bot, db)))
     background_tasks.append(asyncio.create_task(expired_order_notify_loop(bot, db, settings)))
     try:

@@ -198,6 +198,16 @@ class BotCompletionTest(unittest.TestCase):
         with self.db.connect() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM deliveries WHERE order_id=?", (order["id"],)).fetchone()["c"], 1)
 
+
+    def test_bank_topup_instruction_text_does_not_duplicate_qr_url(self) -> None:
+        from nimo_shop.payments.sepay import BankAccount, bank_instruction, vietqr_url
+        bank = BankAccount(bank_bin="970436", account_no="0123456789", account_name="PHAM XUAN TOI", bank_name="VCB")
+        instruction = bank_instruction(bank, amount_minor=100_000, currency="VND", payment_code="NAPABCDEF12")
+        qr = vietqr_url(bank, amount_minor=100_000, currency="VND", add_info="NAPABCDEF12")
+        self.assertIn("NAPABCDEF12", instruction)
+        self.assertNotIn("img.vietqr.io", instruction)
+        self.assertIn("img.vietqr.io", qr)
+
     def test_apply_sepay_transactions_counts_invalid_rows_without_mutating_money(self) -> None:
         summary = apply_sepay_transactions(self.payments, [{"id": "bad"}])
         self.assertEqual(summary["invalid"], 1)
