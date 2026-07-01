@@ -291,3 +291,13 @@
 - Added `bot_notifications.metadata_json` migration to carry payment cleanup actions safely.
 - Added regression test for webhook payment success notice + old QR cleanup metadata.
 - Full test suite: `101 passed`.
+
+## v2.8.17 - Provider payment auto-delivery fix
+
+- Fixed QR/bank-provider order payments only sending a success receipt after webhook settlement without sending the purchased goods.
+- Webhook and poller payment-success notifications now carry `delivery_order_id`; the bot runtime fetches delivered stock rows and sends the real order payload/file automatically.
+- The success receipt now includes the exact fallback command `/taidon ORD...` instead of a generic `/taidon` that opens the help prompt.
+- Binance Pay webhook settlements use the same delivery notification path as Pay2S/SePay, so paid Binance orders are also auto-delivered.
+- Removed duplicate queueing risk in native Binance webhook handling.
+- Added regression tests for order-webhook delivery metadata and bot-side delivery payload sending.
+- Full test suite: `103 passed`.

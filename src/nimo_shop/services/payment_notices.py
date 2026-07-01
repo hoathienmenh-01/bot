@@ -106,12 +106,14 @@ def payment_success_message(result: dict) -> str | None:
         overpay_line = ""
         if overpaid > 0:
             overpay_line = f"\nTiền chuyển dư đã cộng vào ví: <b>{fmt_money(overpaid, currency)}</b>"
+        download_hint = f"\nNếu cần tải lại sau, dùng: <code>/taidon {code}</code>" if code else ""
         return (
             "✅ <b>Thanh toán thành công</b>\n\n"
             f"Mã đơn/thanh toán: <code>{code}</code>\n"
             f"Số tiền nhận: <b>{amount_text}</b>"
             f"{overpay_line}\n\n"
-            "Đơn hàng đã được xác nhận và giao tự động. Bấm /taidon nếu cần tải lại hàng."
+            "Đơn hàng đã được xác nhận. Bot sẽ gửi hàng ngay bên dưới."
+            f"{download_hint}"
         )
 
     balance = result.get("balance_after_minor")
@@ -154,6 +156,12 @@ def queue_payment_success_notice(db: Database, applied_item: dict) -> int | None
     if not message:
         return None
     metadata = {"delete_messages": payment_prompt_delete_messages(intent), "payment_status": result.get("status")}
+    if result.get("status") == "order_delivered" and intent.get("order_id"):
+        # Webhook handlers run outside the Telegram bot handler. Persist the
+        # order id so the bot-side notification loop can fetch the delivered
+        # stock rows and send the actual goods automatically, not only a success
+        # receipt that asks the buyer to use /taidon manually.
+        metadata["delivery_order_id"] = int(intent["order_id"])
     return NotificationService(db).queue_user_message(
         user_id=user_id,
         kind="payment_success",

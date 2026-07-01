@@ -17,6 +17,8 @@ from nimo_shop.payments.binance_pay import BinancePayClient, BinancePayConfig
 from nimo_shop.payments.pay2s import Pay2SClient, Pay2SConfig
 from nimo_shop.payments.sepay import BankAccount, bank_instruction, vietqr_url
 from nimo_shop.services.bank_accounts import BankAccountService
+from nimo_shop.services.catalog import CatalogService
+from nimo_shop.services.orders import OrderService
 from nimo_shop.services.payments import PaymentService
 from nimo_shop.services.payment_notices import remember_payment_prompt_messages, queue_payment_success_notice
 from nimo_shop.services.provider_sync import apply_pay2s_transactions, apply_pay2s_transactions_detailed, apply_sepay_transactions, normalize_pay2s_transaction
@@ -350,6 +352,47 @@ class PaymentClientHelpersTest(unittest.TestCase):
             self.assertIn("Nạp tiền thành công", note["message"])
             metadata = json.loads(note["metadata_json"])
             self.assertEqual(metadata["delete_messages"], [{"chat_id": 555666, "message_id": 10}, {"chat_id": 555666, "message_id": 11}])
+
+    def test_order_webhook_notice_carries_delivery_order_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "shop.db")
+            db.init()
+            user_id = UserService(db).get_or_create(555777, "buyer", "Buyer")
+            with db.transaction() as conn:
+                cat_id = int(conn.execute("INSERT INTO categories(name) VALUES('Cat')").lastrowid)
+            product_id = CatalogService(db).add_product(
+                category_id=cat_id,
+                name="Auto Delivery Item",
+                description="",
+                currency="VND",
+                price_minor=25_000,
+            )
+            CatalogService(db).add_stock(product_id, ["account|password"])
+            order = OrderService(db, order_expires_minutes=15).create_order(user_id=user_id, product_id=product_id)
+            intent = PaymentService(db).create_order_payment_intent(order_id=order["id"], provider="bank", expected_user_id=user_id)
+            remember_payment_prompt_messages(db, intent_id=int(intent["id"]), chat_id=555777, message_ids=[20, 21])
+            with db.connect() as conn:
+                intent = dict(conn.execute("SELECT * FROM payment_intents WHERE id=?", (intent["id"],)).fetchone())
+            tx = {
+                "id": "PAY2S-ORDER-NOTIFY-1",
+                "transactionNumber": "PAY2S-ORDER-NOTIFY-1",
+                "accountNumber": "24301999999",
+                "transferAmount": 25000,
+                "content": f"Thanh toan {intent['public_code']}",
+                "transferType": "IN",
+            }
+            detailed = apply_pay2s_transactions_detailed(PaymentService(db), [tx])
+            self.assertEqual(detailed["summary"]["applied"], 1)
+            self.assertEqual(detailed["results"][0]["result"]["status"], "order_delivered")
+            queued_id = queue_payment_success_notice(db, detailed["results"][0])
+            self.assertIsNotNone(queued_id)
+            note = NotificationService(db).pending()[0]
+            self.assertIn("Bot sẽ gửi hàng ngay bên dưới", note["message"])
+            self.assertIn(f"/taidon {intent['public_code']}", note["message"])
+            metadata = json.loads(note["metadata_json"])
+            self.assertEqual(metadata["payment_status"], "order_delivered")
+            self.assertEqual(metadata["delivery_order_id"], order["id"])
+            self.assertEqual(metadata["delete_messages"], [{"chat_id": 555777, "message_id": 20}, {"chat_id": 555777, "message_id": 21}])
 
     def test_pay2s_outgoing_transaction_is_not_applied(self) -> None:
         row = {"transaction_id": "OUT1", "amount": 50000, "description": "NAPTEST", "type": "OUT"}

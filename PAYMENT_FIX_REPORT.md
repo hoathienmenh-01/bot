@@ -56,3 +56,21 @@ PYTHONPATH=src python3 -m pytest -q
 - Khi tiền được xác nhận, bot xóa các tin hướng dẫn/QR cũ rồi gửi tin mới: `Nạp tiền thành công` hoặc `Thanh toán thành công`.
 - Thêm migration `bot_notifications.metadata_json` để lưu action xóa message cũ.
 - Test mới xác nhận webhook-applied payment tạo notification và metadata xóa QR đúng.
+
+## v2.8.17 follow-up: paid order delivery after provider webhook
+
+User-reported issue: Pay2S QR order payment was confirmed, but Telegram only sent a success receipt and did not send the purchased goods automatically. The generic `/taidon` hint also caused Telegram to send `/taidon` without the order code, showing the help prompt.
+
+Fixes:
+
+- `queue_payment_success_notice()` now writes `delivery_order_id` into notification metadata for `order_delivered` results.
+- `notification_send_loop()` deletes stale QR/instruction messages, sends the success receipt, then sends the actual order delivery payload/file.
+- The provider poller direct notification path now sends delivery payloads too.
+- Success message now contains the exact fallback command `/taidon ORD...`.
+- Native Binance Pay webhook no longer queues duplicate success notifications and uses the same auto-delivery path.
+
+Verification:
+
+- `PYTHONPATH=src python3 -m compileall -q src tests`
+- `PYTHONPATH=src python3 -m pytest -q`
+- Result: `103 passed`.

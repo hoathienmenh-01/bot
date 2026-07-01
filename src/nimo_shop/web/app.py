@@ -986,7 +986,6 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                         description=parsed_binance["payment_code"],
                         raw={"payment_code": parsed_binance["payment_code"], **payload},
                     )
-                    queue_payment_success_notice(self.service.db, {"outcome": "applied", "result": result})
                 else:
                     # Internal payment intents use provider ids "bank" and
                     # "binance_pay". The public URL names are /webhook/sepay and

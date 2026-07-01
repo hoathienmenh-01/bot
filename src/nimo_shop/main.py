@@ -8,9 +8,11 @@ from pathlib import Path
 from nimo_shop.bot.app import build_dispatcher
 from nimo_shop.config import Settings
 from nimo_shop.db import Database, loads
+from nimo_shop.bot import views
 from nimo_shop.payments.pay2s import Pay2SClient, Pay2SConfig
 from nimo_shop.payments.sepay import SepayClient
 from nimo_shop.services.bank_accounts import BankAccountService
+from nimo_shop.services.orders import OrderService
 from nimo_shop.services.payments import PaymentService
 from nimo_shop.services.provider_sync import apply_pay2s_transactions_detailed, apply_sepay_transactions_detailed
 from nimo_shop.services.notifications import NotificationService
@@ -52,6 +54,76 @@ async def _delete_telegram_messages(bot, messages: list[dict]) -> None:
             print(f"[notify] cannot delete old payment message {item}: {exc}")
 
 
+def _log_delivery_download(db: Database, *, order_id: int | None, user_id: int | None, source: str, filename: str) -> None:
+    """Best-effort audit log for automatic delivery messages sent by runtime loops."""
+    try:
+        with db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO delivery_download_logs(order_id, user_id, source, filename) VALUES(?,?,?,?)",
+                (order_id, user_id, source, filename),
+            )
+    except Exception:
+        # Delivery itself must not fail only because an audit row could not be
+        # written, especially while settling a paid order.
+        pass
+
+
+async def _send_order_delivery_payload(bot, db: Database, *, telegram_id: int, order_id: int, source: str) -> bool:
+    """Send delivered goods for an already-paid order.
+
+    Bank/Pay2S/SePay/Binance webhooks are handled outside an aiogram callback,
+    so the usual bot purchase handler is not present to call send_delivery_payload.
+    This helper mirrors that behavior for webhook/poller settlements.
+    """
+    try:
+        with db.connect() as conn:
+            order = OrderService._get_order_in_conn(conn, int(order_id))
+            delivery_rows = OrderService._delivery_in_conn(conn, int(order_id))
+        if not delivery_rows:
+            await bot.send_message(
+                int(telegram_id),
+                "⚠️ Đã thanh toán nhưng chưa tìm thấy dữ liệu giao hàng. Hãy liên hệ admin kèm mã đơn.",
+                parse_mode="HTML",
+            )
+            return False
+
+        await bot.send_message(int(telegram_id), views.delivery(order, delivery_rows), parse_mode="HTML")
+        if views.delivery_needs_file(order, delivery_rows):
+            from aiogram.types import BufferedInputFile
+
+            data = views.delivery_file_text(order, delivery_rows).encode("utf-8")
+            doc = BufferedInputFile(data, filename=views.delivery_filename(order))
+            await bot.send_document(
+                int(telegram_id),
+                doc,
+                caption=(
+                    f"📎 File thông tin hàng cho đơn {views.h(order['public_code'])}. "
+                    "Hãy tải xuống và lưu lại."
+                ),
+                parse_mode="HTML",
+            )
+            _log_delivery_download(
+                db,
+                order_id=int(order.get("id") or order_id),
+                user_id=int(order.get("user_id") or 0) or None,
+                source=source,
+                filename=views.delivery_filename(order),
+            )
+        return True
+    except Exception as exc:  # pragma: no cover - Telegram/runtime only
+        print(f"[delivery] cannot send order #{order_id} to {telegram_id}: {exc}")
+        try:
+            await bot.send_message(
+                int(telegram_id),
+                "⚠️ Thanh toán đã thành công nhưng bot chưa gửi được hàng tự động. "
+                f"Hãy thử <code>/taidon {views.h(str(order.get('public_code') if 'order' in locals() else 'ORD...'))}</code> hoặc liên hệ admin.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return False
+
+
 async def notification_send_loop(bot, db: Database) -> None:
     service = NotificationService(db)
     while True:
@@ -73,6 +145,15 @@ async def notification_send_loop(bot, db: Database) -> None:
                         if isinstance(delete_messages, list) and delete_messages:
                             await _delete_telegram_messages(bot, delete_messages)
                         await bot.send_message(telegram_id, item["message"], parse_mode="HTML")
+                        delivery_order_id = metadata.get("delivery_order_id")
+                        if delivery_order_id:
+                            await _send_order_delivery_payload(
+                                bot,
+                                db,
+                                telegram_id=int(telegram_id),
+                                order_id=int(delivery_order_id),
+                                source="bot_webhook_delivery",
+                            )
                         sent += 1
                         await asyncio.sleep(0.05)
                     except Exception as exc:  # pragma: no cover - per-user runtime failure
@@ -130,6 +211,14 @@ async def _notify_provider_payment(bot, db: Database, applied: dict) -> None:
         text = payment_success_message(result)
         if text:
             await bot.send_message(int(user["telegram_id"]), text, parse_mode="HTML")
+        if str(result.get("status") or "") == "order_delivered" and intent.get("order_id"):
+            await _send_order_delivery_payload(
+                bot,
+                db,
+                telegram_id=int(user["telegram_id"]),
+                order_id=int(intent["order_id"]),
+                source="bot_poll_delivery",
+            )
     except Exception as exc:  # pragma: no cover - Telegram runtime only
         print(f"[bank-sync] cannot notify payment result: {exc}")
 
