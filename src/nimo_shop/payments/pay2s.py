@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import date, timedelta
-from urllib import request
+from urllib import error, request
 
 
 @dataclass(frozen=True)
@@ -21,12 +21,22 @@ class Pay2SConfig:
     base_url: str = "https://api.pay2s.vn/userapi"
 
 
+class Pay2SError(RuntimeError):
+    """Raised with provider response details so admins can fix Pay2S config."""
+
+
 class Pay2SClient:
     def __init__(self, config: Pay2SConfig) -> None:
-        if not (config.token or "").strip():
+        token = (config.token or "").strip()
+        if not token:
             raise ValueError("Pay2S token is required")
-        self.config = config
-        self.base_url = (config.base_url or "https://api.pay2s.vn/userapi").rstrip("/")
+        # Normalize copy/pasted base URLs from Pay2S docs/Admin. Admins often paste
+        # the full endpoint; without this guard the client calls /transactions/transactions.
+        base_url = (config.base_url or "https://api.pay2s.vn/userapi").strip().rstrip("/")
+        if base_url.endswith("/transactions"):
+            base_url = base_url[: -len("/transactions")]
+        self.config = Pay2SConfig(token=token, account_no=str(config.account_no or "").strip(), base_url=base_url)
+        self.base_url = base_url
 
     def list_transactions(self, *, days: int = 2) -> list[dict]:
         """Fetch recent Pay2S bank transactions for one account.
@@ -52,8 +62,19 @@ class Pay2SClient:
             },
             method="POST",
         )
-        with request.urlopen(req, timeout=20) as resp:  # nosec - fixed provider URL by default
-            payload = json.loads(resp.read().decode("utf-8"))
+        try:
+            with request.urlopen(req, timeout=20) as resp:  # nosec - fixed provider URL by default
+                payload = json.loads(resp.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            # Include the provider body, but never echo the token. This turns a vague
+            # HTTP 400 into an actionable Pay2S config error in the bot log.
+            raise Pay2SError(
+                f"Pay2S HTTP {exc.code}: {detail[:1000]} | "
+                f"url={self.base_url}/transactions account={self.config.account_no or '<all>'}"
+            ) from exc
+        except error.URLError as exc:
+            raise Pay2SError(f"Pay2S connection error: {exc}") from exc
         return self._extract_transactions(payload)
 
     @staticmethod

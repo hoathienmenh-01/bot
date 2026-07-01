@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nimo_shop.db import Database
+from nimo_shop.db import Database, dumps
 
 
 class NotificationService:
@@ -26,16 +26,16 @@ class NotificationService:
             )
             return int(cur.lastrowid)
 
-    def queue_user_message(self, *, user_id: int, kind: str, title: str, message: str, product_id: int | None = None) -> int:
+    def queue_user_message(self, *, user_id: int, kind: str, title: str, message: str, product_id: int | None = None, metadata: dict | None = None) -> int:
         if not title.strip() or not message.strip():
             raise ValueError("notification title/message is required")
         with self.db.transaction() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO bot_notifications(kind, title, message, product_id, target_user_id)
-                VALUES(?,?,?,?,?)
+                INSERT INTO bot_notifications(kind, title, message, product_id, target_user_id, metadata_json)
+                VALUES(?,?,?,?,?,?)
                 """,
-                ((kind or "user_message").strip(), title.strip(), message.strip(), product_id, user_id),
+                ((kind or "user_message").strip(), title.strip(), message.strip(), product_id, user_id, dumps(metadata or {})),
             )
             return int(cur.lastrowid)
 

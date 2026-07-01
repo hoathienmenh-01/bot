@@ -1,3 +1,13 @@
+## v2.8.11-pay2s-bank-provider
+
+- Added native Pay2S bank provider support to the multi-bank receiving account module.
+- `pay2s` provider can poll Pay2S transaction history using the Pay2S `pay2s-token` header and `POST /userapi/transactions`.
+- Added `/webhook/pay2s` endpoint that verifies Pay2S `Authorization: Bearer <webhook_token>` from the bank account API secret field and reconciles Pay2S `transactions[]` payloads.
+- Extended bank transaction normalization for Pay2S fields: `transaction_id`, `account_number`, `bank`, `amount`, `description`, `type`, `transactionNumber`, `content`, `transferType`, `transferAmount`, and `checksum`.
+- Updated bank provider UI labels so Pay2S is a first-class automatic provider, not a generic/custom placeholder.
+- Added migration to allow `provider='pay2s'` in existing SQLite `bank_accounts` tables.
+- Added regression tests for Pay2S polling normalization, Pay2S account storage, and Pay2S webhook confirmation.
+
 
 ## v2.8.4 - Wallet Top-up Flow Fix
 
@@ -193,3 +203,91 @@
 - Added `APP_ENV=production` guard requiring `WEB_COOKIE_SECURE=true`.
 - Synced Telegram `/addstock` duplicate policy with web `app_settings`.
 - Added commercial regression tests; full suite now passes: `85 passed`.
+
+
+## v2.8.6 payment automation UI polish
+- Làm rõ cấu hình SePay API tự động quét giao dịch ngân hàng.
+- Binance wallet topup dùng Binance Pay merchant order khi API/webhook đã cấu hình; nếu thiếu sẽ fallback Binance ID thủ công.
+- Sửa QR VietQR không còn bị hiển thị lặp URL + ảnh QR.
+- Sidebar admin cố định và nhớ vị trí scroll sau khi bấm chức năng.
+- Ô cấu hình dạng click rõ hơn, dễ nhận biết hơn.
+
+## v2.8.7 - Bank Auto Topup + Admin UX Fixes
+
+- Fixed bank top-up instruction so VietQR is sent once as a Telegram photo, not duplicated as both text URL and photo.
+- Made SePay auto-poller read live Web Admin settings from `app_settings` instead of only `.env`, so bank auto top-up works after configuring in Admin and restarting.
+- Kept SePay watcher running even when env values are blank; it waits until Bank/SePay are enabled in Admin settings.
+- Reduced admin notification queue latency from 15 seconds to 2 seconds.
+- Made Admin sidebar groups collapsible with persisted open/closed state and preserved sidebar scroll position.
+- Expanded webhook bank payload parsing for common SePay/bank field names such as `amount_in`, `transaction_content`, `transfer_content`, `transactionId`, and `bank_transaction_id`.
+
+## v2.8.9 - Multi Bank Accounts + Binance runtime config
+
+- Added a multi-bank receiving account module in Web Admin at **Thanh toán & ví → Tài khoản ngân hàng**.
+- Each bank account can store label, bank name, VietQR BIN, account number, owner name, provider type, API key/secret, base URL, poll interval, enabled/default state and notes.
+- Bot now lets customers choose a bank account when multiple enabled receiving accounts exist, then creates the correct `NAP...`/`ORD...` code and VietQR for that account.
+- SePay poller now scans every enabled bank account with provider `sepay` and its own API key; old single `SEPAY_API_KEY` remains as backward-compatible fallback.
+- Provider transaction ids are prefixed by bank-account id during polling to avoid collisions across multiple linked accounts.
+- Binance Pay creation now reads live Web Admin `app_settings` at runtime, not only `.env`, before falling back to Binance ID manual instructions.
+- Added regression tests for multi-bank account storage/default behavior and multi-bank SePay transaction id collision protection.
+- Full test suite: `89 passed`.
+
+## v2.8.10-admin-theme-bank-api-panel
+- Fixed Admin UI contrast: dark mode now uses true black backgrounds instead of blue/gray gradients; light mode uses higher-contrast text, inputs, cards and tables.
+- Added bank/API account configuration directly inside Web Admin → Cấu hình, not only the separate Bank Accounts page.
+- Added quick bank selector presets that auto-fill bank name and VietQR BIN for common Vietnamese banks.
+- Clarified provider API fields per bank account: provider, API key/access token, API secret/client secret, base URL/endpoint, poll interval, default/enabled flags.
+- Added regression test for high-contrast theme CSS and visible multi-bank API fields in the Settings page.
+
+## v2.8.12 - Pay2S polling and admin config persistence fix
+
+- Fixed Pay2S auto-polling for multi-bank accounts so enabled Pay2S/SePay bank accounts poll even when the legacy `BANK_ENABLED` single-bank switch is off.
+- Made Pay2S response parsing tolerant of `transactions`, nested `data.transactions`, `data.items`, `records`, `results`, and direct list payloads.
+- Added Telegram confirmation messages after background bank/Pay2S payments are applied to a wallet top-up or order payment.
+- Kept saved bank API keys/secrets visible as masked status in Admin instead of appearing lost after saving.
+- Returning from embedded bank-account forms in Settings now goes back to Settings, so the saved configuration stays visible in the same place.
+- Added regression tests for nested Pay2S payload parsing and Pay2S-to-bank-intent reconciliation.
+- Full test suite: `95 passed`.
+
+## v2.8.13 - Pay2S poller isolation and diagnostics
+
+- Fixed bank-provider polling so a bad legacy `SEPAY_API_KEY` can no longer block Pay2S multi-bank polling after the shop has created bank-account rows.
+- Legacy single-bank SePay fallback is now used only for old installs with no `bank_accounts` rows at all.
+- Isolated provider polling per bank account: one failed SePay/Pay2S account no longer stops other enabled accounts from being scanned.
+- Replaced misleading `[sepay] polling error` with provider-specific logs such as `[bank-sync:pay2s] account=...` or `[bank-sync:sepay] account=...`.
+- Added regression tests for Pay2S multi-bank configuration overriding stale legacy SePay config and for incomplete multi-bank rows not falling back to stale SePay keys.
+- Full test suite: `97 passed`.
+
+## v2.8.14 - Bank Account Admin Edit/Delete UX
+
+- Made multi-bank account management explicit in Web Admin so admins do not need SQL/code changes to manage receiving accounts.
+- Added a visible **Quản lý nhanh** table with always-visible **Sửa**, **Xóa**, and **Đặt mặc định** actions for each bank account.
+- Added a dedicated `/bank-accounts/edit?id=...` edit page for changing bank/provider/API/token/account details.
+- Fixed embedded Settings bank-account actions to preserve the correct return page after delete/default actions.
+- Added clear UI copy that adding, editing, deleting, changing provider and replacing Pay2S/SePay tokens are all handled in Web Admin.
+- Added HTTP regression coverage for create → edit → update → delete bank account flow from Web Admin.
+- Full test suite: `97 passed`.
+
+## v2.8.15-pay2s-diagnostics
+- Normalize Pay2S base URL when admins paste the full `/transactions` endpoint.
+- Surface Pay2S HTTP error response bodies in runtime logs so HTTP 400 can be diagnosed without guessing.
+- Add regression test for Pay2S copied endpoint/token/account normalization.
+## Payment hardening patch
+
+- Canonicalized bank provider handling: SePay/Pay2S/Casso/manual now reconcile through internal provider `bank`.
+- Fixed Pay2S webhook/poller duplicate-credit risk by using source-level transaction ids.
+- Bound selected bank account ids to payment intents and reject mismatched receiving accounts.
+- Blocked Binance/USDT order payment for VND-priced orders until an explicit FX quote module exists.
+- Persisted missing-code bank transactions for admin reconciliation.
+- Added regression tests for Pay2S double-credit and bank-account mismatch.
+
+
+## v2.8.16 - Payment webhook buyer notification cleanup
+
+- Fixed Pay2S/SePay/Binance webhook-settled payments being applied silently without notifying the buyer in Telegram.
+- Added a queued `payment_success` notification path so the web webhook thread can hand buyer messages to the running bot process.
+- Bank top-up and order-bank payment prompts now persist their Telegram instruction/QR message ids on the payment intent.
+- After a provider confirms payment, the bot deletes stale QR/instruction messages and sends a final success message with the credited amount and wallet balance.
+- Added `bot_notifications.metadata_json` migration to carry payment cleanup actions safely.
+- Added regression test for webhook payment success notice + old QR cleanup metadata.
+- Full test suite: `101 passed`.

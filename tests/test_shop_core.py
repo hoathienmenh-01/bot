@@ -166,7 +166,7 @@ class ShopCoreTest(unittest.TestCase):
         self.assertEqual(result2["status"], "duplicate")
         self.assertEqual(self.wallet.get_balances(self.user_id)["VND"], 200_000)
         self.assertEqual(self._one("SELECT status FROM external_payment_events WHERE provider_tx_id='BANK-TX-1'")["status"], "wallet_credited")
-        self.assertEqual(self._one("SELECT COUNT(*) AS c FROM cash_ledger WHERE provider='sepay'")["c"], 1)
+        self.assertEqual(self._one("SELECT COUNT(*) AS c FROM cash_ledger WHERE provider='bank'")["c"], 1)
 
     def test_wallet_topup_under_requested_amount_credits_actual_money_received(self) -> None:
         intent = self.payments.create_wallet_topup_intent(
@@ -312,20 +312,14 @@ class ShopCoreTest(unittest.TestCase):
         self.assertEqual(result["status"], "wallet_credited_expired_intent")
         self.assertEqual(self.wallet.get_balances(self.user_id)["VND"], 50_000)
 
-    def test_currency_mismatch_payment_is_credited_to_received_currency_wallet(self) -> None:
+    def test_crypto_order_intent_for_vnd_order_is_rejected_without_fx_quote(self) -> None:
         order = self.orders.create_order(user_id=self.user_id, product_id=self.product_id, quantity=1)
-        intent = self.payments.create_order_payment_intent(order_id=order["id"], provider="binance")
-        result = self.payments.confirm_provider_transaction(
-            provider="binance",
-            provider_tx_id="BINANCE-USDT-FOR-VND-ORDER",
-            amount_minor=to_minor("10", "USDT"),
-            currency="USDT",
-            description=f"USDT {intent['public_code']}",
-            raw={},
-        )
-        self.assertEqual(result["status"], "wallet_credited_currency_mismatch")
-        self.assertEqual(self.wallet.get_balances(self.user_id)["USDT"], to_minor("10", "USDT"))
+        with self.assertRaises(ValueError):
+            self.payments.create_order_payment_intent(order_id=order["id"], provider="binance")
+        with self.assertRaises(ValueError):
+            self.payments.create_order_payment_intent(order_id=order["id"], provider="usdt_bep20")
         self.assertEqual(self._one("SELECT status FROM orders WHERE id=?", (order["id"],))["status"], "awaiting_payment")
+        self.assertEqual(self._one("SELECT COUNT(*) AS c FROM payment_intents WHERE order_id=?", (order["id"],))["c"], 0)
 
     def test_unmatched_payment_code_is_persisted_for_admin_audit_and_raises(self) -> None:
         with self.assertRaises(PaymentMatchError):
@@ -534,7 +528,7 @@ class PaymentHardeningTest(unittest.TestCase):
         order = self.orders.create_order(user_id=self.user_id, product_id=self.product_id)
         first = self.payments.create_order_payment_intent(order_id=order["id"], provider="bank", expected_user_id=self.user_id)
         second = self.payments.create_order_payment_intent(order_id=order["id"], provider="bank", expected_user_id=self.user_id)
-        other_provider = self.payments.create_order_payment_intent(order_id=order["id"], provider="binance_pay", expected_user_id=self.user_id)
+        bank_alias = self.payments.create_order_payment_intent(order_id=order["id"], provider="sepay", expected_user_id=self.user_id)
         self.assertEqual(first["id"], second["id"])
         self.assertEqual(first["public_code"], second["public_code"])
-        self.assertNotEqual(first["public_code"], other_provider["public_code"])
+        self.assertEqual(first["public_code"], bank_alias["public_code"])

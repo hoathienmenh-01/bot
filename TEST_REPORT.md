@@ -1,25 +1,49 @@
-# Test Report
+# Test report v2.8.15
 
-Date: 2026-07-01
-Package: NIMO Telegram Shop Bot commercial hardening fix
+Command:
 
-## Commands
+```bash
+PYTHONPATH=src python -m compileall -q src tests
+PYTHONPATH=src pytest -q
+```
+
+Result:
+
+```text
+98 passed in 10.79s
+```
+
+## Payment patch verification
+
+Command run:
+
+```bash
+PYTHONPATH=src python3 -m pytest -q
+```
+
+Result: `100 passed`.
+
+Covered regressions:
+
+- Pay2S webhook + poller same transaction is idempotent.
+- Selected bank account mismatch is not auto-credited.
+- Binance/USDT order payment is blocked for VND orders without FX quote.
+- Bank provider aliases reconcile to canonical `bank`.
+
+
+## Payment webhook notification patch verification
+
+Command run:
 
 ```bash
 PYTHONPATH=src python3 -m compileall -q src tests
 PYTHONPATH=src python3 -m pytest -q
 ```
 
-## Result
+Result: `101 passed in 10.99s`.
 
-```text
-85 passed in 9.34s
-```
+Covered regressions:
 
-## Added/updated commercial regression coverage
-
-- Preorder remaining-payment expiry does not lose buyer deposit.
-- Preorder is fulfilled only after the linked remaining-payment order is delivered.
-- Buyer API idempotency key returns one purchase and does not double debit/deliver.
-- Native Binance Pay webhook signature and payload are accepted.
-- Previous webhook, admin, stock, payment, wallet, backup, product image, and bot rendering tests still pass.
+- Webhook-applied Pay2S payment now queues a buyer-facing `payment_success` Telegram notification.
+- The queued payment notification carries old instruction/QR message ids for cleanup.
+- Existing Pay2S idempotency, bank-account mismatch, Binance currency guard and admin/web tests remain passing.

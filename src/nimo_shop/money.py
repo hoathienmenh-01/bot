@@ -19,7 +19,13 @@ def normalize_currency(currency: str) -> str:
 def to_minor(amount: int | float | str | Decimal, currency: str) -> int:
     cur = normalize_currency(currency)
     scale = SCALE[cur]
-    value = Decimal(str(amount))
+    raw = str(amount).strip()
+    if cur == "VND" and isinstance(amount, str):
+        # Accept Vietnamese thousand separators in admin forms / bank payloads:
+        # 1.000.000, 1,000,000, 1 000 000, 1000000đ. VND has no decimal minor unit.
+        raw = raw.replace("đ", "").replace("VND", "").replace("vnd", "").replace(" ", "")
+        raw = raw.replace(".", "").replace(",", "")
+    value = Decimal(raw)
     if value < 0:
         raise ValueError("amount must be non-negative")
     if scale == 1:

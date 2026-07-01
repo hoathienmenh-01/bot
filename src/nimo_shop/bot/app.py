@@ -37,6 +37,7 @@ from nimo_shop.services.catalog import CatalogService
 from nimo_shop.services.finance import FinanceService
 from nimo_shop.services.orders import OrderOwnershipError, OrderService, OrderStateError, OutOfStock
 from nimo_shop.services.payments import PaymentMatchError, PaymentService
+from nimo_shop.services.payment_notices import remember_payment_prompt_messages
 from nimo_shop.services.preorders import PreorderOwnershipError, PreorderService, PreorderStateError
 from nimo_shop.services.users import UserService
 from nimo_shop.services.wallet import InsufficientFunds, WalletService
@@ -377,15 +378,17 @@ def build_dispatcher(settings: Settings, db: Database):
         if amount_minor <= 0:
             await message.answer("❌ Số tiền nạp phải lớn hơn 0.")
             return
-        intent = payments.create_wallet_topup_intent(user_id=user_id, provider="bank", currency="VND", amount_minor=amount_minor)
+        intent = payments.create_wallet_topup_intent(user_id=user_id, provider="bank", currency="VND", amount_minor=amount_minor, bank_account_id=bank_account_id)
         extra, qr = payment_extra_for_bank(intent, bank_account_id=bank_account_id)
-        await message.answer(
+        sent_messages: list[int] = []
+        instruction_msg = await message.answer(
             views.payment_instruction(intent, provider_label="ngân hàng", extra=extra),
             parse_mode="HTML",
         )
+        sent_messages.append(int(instruction_msg.message_id))
         if qr:
             try:
-                await message.answer_photo(
+                qr_msg = await message.answer_photo(
                     qr,
                     caption=(
                         f"🏦 QR chuyển khoản {views.h(intent['public_code'])}\n"
@@ -393,8 +396,20 @@ def build_dispatcher(settings: Settings, db: Database):
                     ),
                     parse_mode="HTML",
                 )
+                sent_messages.append(int(qr_msg.message_id))
             except Exception as exc:
-                await message.answer(f"⚠️ Không gửi được QR ngân hàng: <code>{views.h(exc)}</code>", parse_mode="HTML")
+                warn_msg = await message.answer(f"⚠️ Không gửi được QR ngân hàng: <code>{views.h(exc)}</code>", parse_mode="HTML")
+                sent_messages.append(int(warn_msg.message_id))
+        try:
+            await asyncio.to_thread(
+                remember_payment_prompt_messages,
+                db,
+                intent_id=int(intent["id"]),
+                chat_id=int(message.chat.id),
+                message_ids=sent_messages,
+            )
+        except Exception as exc:
+            print(f"[payment-prompt] cannot remember topup prompt messages: {exc}")
 
     async def send_binance_topup_intent(message: Message, user_id: int, amount_minor: int) -> None:
         if amount_minor <= 0:
@@ -1194,12 +1209,15 @@ def build_dispatcher(settings: Settings, db: Database):
         await callback.answer()
 
     async def send_order_bank_payment(callback: CallbackQuery, user_id: int, order_id: int, bank_account_id: int | None = None) -> None:
-        intent = payments.create_order_payment_intent(order_id=order_id, provider="bank", expected_user_id=user_id)
+        intent = payments.create_order_payment_intent(order_id=order_id, provider="bank", expected_user_id=user_id, bank_account_id=bank_account_id)
         extra, qr = payment_extra_for_bank(intent, bank_account_id=bank_account_id)
+        sent_messages: list[int] = []
         await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="ngân hàng", extra=extra))
-        if qr:
+        if callback.message:
+            sent_messages.append(int(callback.message.message_id))
+        if qr and callback.message:
             try:
-                await callback.message.answer_photo(
+                qr_msg = await callback.message.answer_photo(
                     qr,
                     caption=(
                         f"🏦 QR chuyển khoản {views.h(intent['public_code'])}\n"
@@ -1207,8 +1225,21 @@ def build_dispatcher(settings: Settings, db: Database):
                     ),
                     parse_mode="HTML",
                 )
+                sent_messages.append(int(qr_msg.message_id))
             except Exception as qr_exc:
-                await callback.message.answer(f"⚠️ Không gửi được QR ngân hàng: <code>{views.h(qr_exc)}</code>", parse_mode="HTML")
+                warn_msg = await callback.message.answer(f"⚠️ Không gửi được QR ngân hàng: <code>{views.h(qr_exc)}</code>", parse_mode="HTML")
+                sent_messages.append(int(warn_msg.message_id))
+        if callback.message and sent_messages:
+            try:
+                await asyncio.to_thread(
+                    remember_payment_prompt_messages,
+                    db,
+                    intent_id=int(intent["id"]),
+                    chat_id=int(callback.message.chat.id),
+                    message_ids=sent_messages,
+                )
+            except Exception as exc:
+                print(f"[payment-prompt] cannot remember order prompt messages: {exc}")
 
     @router.callback_query(F.data.startswith("paybank:"))
     async def cb_pay_bank(callback: CallbackQuery):
@@ -1244,7 +1275,6 @@ def build_dispatcher(settings: Settings, db: Database):
         user_id = ensure_user_from_callback(callback)
         order_id = int(callback.data.split(":", 1)[1])
         try:
-            intent = payments.create_order_payment_intent(order_id=order_id, provider="binance_pay", expected_user_id=user_id)
             order = orders.get_order(order_id)
             extra = ""
             binance_enabled = app_setting_bool("BINANCE_PAY_ENABLED", settings.binance_pay_enabled)
@@ -1253,7 +1283,10 @@ def build_dispatcher(settings: Settings, db: Database):
             binance_base_url = app_setting("BINANCE_PAY_BASE_URL", settings.binance_pay_base_url)
             binance_return_url = app_setting("BINANCE_PAY_RETURN_URL", settings.binance_pay_return_url)
             binance_webhook_url = app_setting("BINANCE_PAY_WEBHOOK_URL", settings.binance_pay_webhook_url)
-            if binance_enabled and binance_api_key and binance_secret_key:
+            merchant_ready = binance_enabled and bool(binance_api_key and binance_secret_key)
+            provider = "binance_pay" if merchant_ready else "binance_manual"
+            intent = payments.create_order_payment_intent(order_id=order_id, provider=provider, expected_user_id=user_id)
+            if merchant_ready:
                 client = BinancePayClient(BinancePayConfig(
                     api_key=binance_api_key,
                     secret_key=binance_secret_key,

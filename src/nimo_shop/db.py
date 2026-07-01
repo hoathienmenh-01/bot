@@ -207,6 +207,7 @@ CREATE TABLE IF NOT EXISTS bot_notifications (
     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','failed')),
     sent_count INTEGER NOT NULL DEFAULT 0,
     error TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     sent_at TEXT,
     FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL,
@@ -316,6 +317,8 @@ class Database:
         notif_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_notifications)")}
         if "target_user_id" not in notif_cols:
             conn.execute("ALTER TABLE bot_notifications ADD COLUMN target_user_id INTEGER")
+        if "metadata_json" not in notif_cols:
+            conn.execute("ALTER TABLE bot_notifications ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
 
         category_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(categories)")}
         if "category_icon" not in category_cols:

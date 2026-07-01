@@ -177,7 +177,7 @@ class BotCompletionTest(unittest.TestCase):
             "transaction_content": "Thanh toan ORDABCDEF12",
             "amount_in": "150,000",
         })
-        self.assertEqual(row["provider_tx_id"], "BANK123")
+        self.assertEqual(row["provider_tx_id"], "sepay:BANK123")
         self.assertEqual(row["amount_minor"], 150_000)
         self.assertEqual(row["description"], "Thanh toan ORDABCDEF12")
 

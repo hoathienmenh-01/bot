@@ -7,14 +7,14 @@ from pathlib import Path
 
 from nimo_shop.bot.app import build_dispatcher
 from nimo_shop.config import Settings
-from nimo_shop.db import Database
+from nimo_shop.db import Database, loads
 from nimo_shop.payments.pay2s import Pay2SClient, Pay2SConfig
 from nimo_shop.payments.sepay import SepayClient
 from nimo_shop.services.bank_accounts import BankAccountService
 from nimo_shop.services.payments import PaymentService
-from nimo_shop.money import fmt_money
 from nimo_shop.services.provider_sync import apply_pay2s_transactions_detailed, apply_sepay_transactions_detailed
 from nimo_shop.services.notifications import NotificationService
+from nimo_shop.services.payment_notices import payment_prompt_delete_messages, payment_success_message
 
 _TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{20,}$")
 _PLACEHOLDER_TOKENS = {
@@ -40,6 +40,18 @@ def is_configured_bot_token(token: str | None) -> bool:
     return bool(_TOKEN_RE.match(value))
 
 
+async def _delete_telegram_messages(bot, messages: list[dict]) -> None:
+    """Best-effort cleanup of stale payment instruction/QR messages."""
+    for item in messages:
+        try:
+            chat_id = int(item.get("chat_id"))
+            message_id = int(item.get("message_id"))
+            await bot.delete_message(chat_id, message_id)
+            await asyncio.sleep(0.03)
+        except Exception as exc:  # pragma: no cover - Telegram runtime only
+            print(f"[notify] cannot delete old payment message {item}: {exc}")
+
+
 async def notification_send_loop(bot, db: Database) -> None:
     service = NotificationService(db)
     while True:
@@ -47,9 +59,19 @@ async def notification_send_loop(bot, db: Database) -> None:
             pending = await asyncio.to_thread(service.pending, 5)
             for item in pending:
                 recipients = await asyncio.to_thread(service.recipients, item, 5000)
+                try:
+                    metadata = loads(str(item.get("metadata_json") or "{}"))
+                except Exception:
+                    metadata = {}
                 sent = 0
                 for telegram_id in recipients:
                     try:
+                        # Payment-success notices may carry stale QR/instruction
+                        # message ids. Delete them first, then send a fresh final
+                        # success message so the chat is not left with an active QR.
+                        delete_messages = metadata.get("delete_messages") or []
+                        if isinstance(delete_messages, list) and delete_messages:
+                            await _delete_telegram_messages(bot, delete_messages)
                         await bot.send_message(telegram_id, item["message"], parse_mode="HTML")
                         sent += 1
                         await asyncio.sleep(0.05)
@@ -91,12 +113,7 @@ def _runtime_bool(db: Database, key: str, fallback: bool = False) -> bool:
 
 
 async def _notify_provider_payment(bot, db: Database, applied: dict) -> None:
-    """Notify the buyer after a bank provider transaction is actually applied.
-
-    Before this fix the wallet/order was processed silently by the background
-    poller, so customers thought bank/Pay2S auto payment was broken because no
-    Telegram message was sent after the transfer.
-    """
+    """Notify the buyer after a bank provider transaction is actually applied."""
     if applied.get("outcome") != "applied":
         return
     result = applied.get("result") or {}
@@ -109,91 +126,105 @@ async def _notify_provider_payment(bot, db: Database, applied: dict) -> None:
             user = conn.execute("SELECT telegram_id FROM users WHERE id=?", (int(user_id),)).fetchone()
         if not user:
             return
-        status = str(result.get("status") or "confirmed")
-        amount_text = fmt_money(int(intent.get("amount_minor") or 0), str(intent.get("currency") or "VND"))
-        code = str(intent.get("public_code") or "")
-        if status == "order_delivered":
-            text = (
-                "✅ <b>Đã xác nhận chuyển khoản thành công</b>\n\n"
-                f"Mã thanh toán: <code>{code}</code>\n"
-                f"Số tiền: <b>{amount_text}</b>\n"
-                "Đơn hàng đã được thanh toán và giao hàng tự động. Bấm /taidon để tải lại hàng nếu cần."
-            )
-        else:
-            balance = result.get("balance_after_minor")
-            balance_text = ""
-            if balance is not None:
-                balance_text = f"\nSố dư sau cộng: <b>{fmt_money(int(balance), str(intent.get('currency') or 'VND'))}</b>"
-            text = (
-                "✅ <b>Đã nhận chuyển khoản và cộng vào ví</b>\n\n"
-                f"Mã nạp: <code>{code}</code>\n"
-                f"Số tiền: <b>{amount_text}</b>"
-                f"{balance_text}"
-            )
-        await bot.send_message(int(user["telegram_id"]), text, parse_mode="HTML")
+        await _delete_telegram_messages(bot, payment_prompt_delete_messages(intent))
+        text = payment_success_message(result)
+        if text:
+            await bot.send_message(int(user["telegram_id"]), text, parse_mode="HTML")
     except Exception as exc:  # pragma: no cover - Telegram runtime only
         print(f"[bank-sync] cannot notify payment result: {exc}")
+
+
+def _bank_poll_accounts(settings: Settings, db: Database) -> tuple[list[dict], int]:
+    """Return enabled automatic bank-provider accounts and the base poll interval.
+
+    Legacy single-bank SePay settings are only used when the shop has not been
+    migrated to the multi-bank table yet. If any multi-bank account exists, even
+    a disabled or incomplete one, do not silently fall back to SEPAY_API_KEY.
+    This prevents a Pay2S shop from accidentally calling SePay with a Pay2S/MB
+    token and blocking real Pay2S polling with HTTP 400 errors.
+    """
+    legacy_poll_seconds = max(5, int(_runtime_setting(db, "SEPAY_POLL_SECONDS", settings.sepay_poll_seconds) or settings.sepay_poll_seconds))
+    account_service = BankAccountService(db)
+    all_accounts = account_service.list_accounts(include_disabled=True)
+    accounts = [
+        a for a in all_accounts
+        if int(a.get("is_enabled") or 0)
+        and str(a.get("provider") or "").lower() in {"sepay", "pay2s"}
+        and str(a.get("api_key") or "").strip()
+    ]
+
+    # Compatibility path for old installs that only used .env/app_settings
+    # SEPAY_API_KEY. Never use it once the admin has created multi-bank rows.
+    if not all_accounts and _runtime_bool(db, "BANK_ENABLED", settings.bank_enabled):
+        api_key = _runtime_setting(db, "SEPAY_API_KEY", settings.sepay_api_key)
+        if api_key:
+            accounts = [{
+                "id": "legacy",
+                "label": "Legacy SePay",
+                "provider": "sepay",
+                "api_key": api_key,
+                "account_no": "",
+                "base_url": "",
+                "poll_seconds": legacy_poll_seconds,
+            }]
+    return accounts, legacy_poll_seconds
 
 
 async def sepay_poll_loop(settings: Settings, payments: PaymentService, db: Database, bot=None) -> None:
     while True:
         poll_seconds = 10
         try:
-            bank_enabled = _runtime_bool(db, "BANK_ENABLED", settings.bank_enabled)
-            legacy_poll_seconds = max(5, int(_runtime_setting(db, "SEPAY_POLL_SECONDS", settings.sepay_poll_seconds) or settings.sepay_poll_seconds))
+            accounts, legacy_poll_seconds = _bank_poll_accounts(settings, db)
             poll_seconds = legacy_poll_seconds
-
-            account_service = BankAccountService(db)
-            accounts = [
-                a for a in account_service.enabled_accounts()
-                if str(a.get("provider") or "").lower() in {"sepay", "pay2s"} and str(a.get("api_key") or "").strip()
-            ]
-
-            # Multi-bank accounts have their own enabled switch. Do not require
-            # the legacy BANK_ENABLED flag, otherwise a correctly configured
-            # Pay2S/SePay account never polls if the old single-bank switch is off.
-            if not accounts and bank_enabled:
-                api_key = _runtime_setting(db, "SEPAY_API_KEY", settings.sepay_api_key)
-                if api_key:
-                    accounts = [{"id": "legacy", "label": "Legacy SePay", "provider": "sepay", "api_key": api_key, "base_url": "", "poll_seconds": legacy_poll_seconds}]
             if not accounts:
                 await asyncio.sleep(min(poll_seconds, 10))
                 continue
 
             combined = {"processed": 0, "duplicates": 0, "unmatched": 0, "invalid": 0, "applied": 0}
             for account in accounts:
-                account_poll = max(5, int(account.get("poll_seconds") or legacy_poll_seconds))
-                poll_seconds = min(poll_seconds, account_poll)
                 provider = str(account.get("provider") or "sepay").lower()
-                tagged_transactions = []
-                if provider == "pay2s":
-                    client = Pay2SClient(Pay2SConfig(
-                        token=str(account.get("api_key") or ""),
-                        account_no=str(account.get("account_no") or ""),
-                        base_url=str(account.get("base_url") or "https://api.pay2s.vn/userapi"),
-                    ))
-                    transactions = await asyncio.to_thread(client.list_transactions, days=2)
-                    apply_fn = apply_pay2s_transactions_detailed
-                else:
-                    client = SepayClient(str(account.get("api_key") or ""), base_url=str(account.get("base_url") or "https://my.sepay.vn/userapi"))
-                    transactions = await asyncio.to_thread(client.list_transactions, limit=50)
-                    apply_fn = apply_sepay_transactions_detailed
-                for tx in transactions:
-                    item = dict(tx)
-                    item["_bank_account_id"] = str(account.get("id") or "legacy")
-                    item["_bank_account_label"] = str(account.get("label") or "")
-                    tagged_transactions.append(item)
-                detailed = apply_fn(payments, tagged_transactions)
-                summary = detailed.get("summary", {})
-                for item in detailed.get("results", []):
-                    if bot is not None:
-                        await _notify_provider_payment(bot, db, item)
-                for key in combined:
-                    combined[key] += int(summary.get(key) or 0)
+                account_id = str(account.get("id") or "legacy")
+                account_label = str(account.get("label") or account.get("bank_name") or account_id)
+                try:
+                    account_poll = max(5, int(account.get("poll_seconds") or legacy_poll_seconds))
+                    poll_seconds = min(poll_seconds, account_poll)
+                    tagged_transactions = []
+                    if provider == "pay2s":
+                        client = Pay2SClient(Pay2SConfig(
+                            token=str(account.get("api_key") or ""),
+                            account_no=str(account.get("account_no") or ""),
+                            base_url=str(account.get("base_url") or "https://api.pay2s.vn/userapi"),
+                        ))
+                        transactions = await asyncio.to_thread(client.list_transactions, days=2)
+                        apply_fn = apply_pay2s_transactions_detailed
+                    elif provider == "sepay":
+                        client = SepayClient(str(account.get("api_key") or ""), base_url=str(account.get("base_url") or "https://my.sepay.vn/userapi"))
+                        transactions = await asyncio.to_thread(client.list_transactions, limit=50)
+                        apply_fn = apply_sepay_transactions_detailed
+                    else:
+                        continue
+                    for tx in transactions:
+                        item = dict(tx)
+                        item["_bank_account_id"] = account_id
+                        item["_bank_account_label"] = account_label
+                        tagged_transactions.append(item)
+                    detailed = apply_fn(payments, tagged_transactions)
+                    summary = detailed.get("summary", {})
+                    for item in detailed.get("results", []):
+                        if bot is not None:
+                            await _notify_provider_payment(bot, db, item)
+                    for key in combined:
+                        combined[key] += int(summary.get(key) or 0)
+                    if summary.get("applied") or summary.get("unmatched") or summary.get("invalid"):
+                        print(f"[bank-sync:{provider}] account={account_id} {account_label!r} {summary}")
+                except Exception as exc:  # pragma: no cover - provider/runtime logging only
+                    # Do not let one bad provider/account block the others. This
+                    # was visible as '[sepay] HTTP 400' while Pay2S was never reached.
+                    print(f"[bank-sync:{provider}] account={account_id} {account_label!r} polling error: {exc}")
             if combined.get("applied") or combined.get("unmatched") or combined.get("invalid"):
                 print(f"[bank-sync] {combined}")
         except Exception as exc:  # pragma: no cover - runtime logging only
-            print(f"[sepay] polling error: {exc}")
+            print(f"[bank-sync] loop error: {exc}")
         await asyncio.sleep(poll_seconds)
 
 

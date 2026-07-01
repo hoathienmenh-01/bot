@@ -25,7 +25,10 @@ def _parse_vnd_amount_minor(value: Any) -> int:
         raise ValueError("transaction amount is missing")
     if isinstance(value, (int, float, Decimal)):
         return to_minor(str(value), "VND")
-    text = str(value).strip().replace(",", "").replace(" ", "")
+    text = str(value).strip().replace("đ", "").replace("VND", "").replace("vnd", "").replace(" ", "")
+    # Vietnamese bank APIs and admin exports often use 1.000.000 or 1,000,000.
+    # VND has no decimal minor unit, so dots/commas here are thousand separators.
+    text = text.replace(".", "").replace(",", "")
     if not text:
         raise ValueError("transaction amount is empty")
     return to_minor(text, "VND")
@@ -40,14 +43,21 @@ def _ensure_incoming(tx: dict[str, Any]) -> None:
         raise ValueError("outgoing transaction ignored")
 
 
+def canonical_bank_provider_tx_id(source: str, tx_id: Any) -> str:
+    source = str(source or "bank").strip().lower()
+    raw_id = str(tx_id or "").strip()
+    if not raw_id:
+        raise ValueError("transaction id is missing")
+    if raw_id.lower().startswith(f"{source}:"):
+        return raw_id
+    # Canonical source prefix prevents SePay/Pay2S ID collisions while keeping
+    # the same real transaction id identical across webhook and polling paths.
+    return f"{source}:{raw_id}"
+
+
 def _normalize_bank_transaction(tx: dict[str, Any], *, source: str) -> dict[str, Any]:
     _ensure_incoming(tx)
-    tx_id = _first_value(tx, TX_ID_KEYS)
-    source_account_id = tx.get("_bank_account_id")
-    if tx_id and source_account_id not in (None, ""):
-        # Prefix by provider + bank-account id so two connected accounts cannot
-        # collide if a provider returns a short/local transaction reference.
-        tx_id = f"{source}:bankacct:{source_account_id}:{tx_id}"
+    tx_id = canonical_bank_provider_tx_id(source, _first_value(tx, TX_ID_KEYS))
     description = _first_value(tx, DESC_KEYS)
     amount_value = _first_value(tx, AMOUNT_KEYS)
     if not tx_id:
@@ -89,6 +99,7 @@ def _apply_transactions_detailed(payment_service: PaymentService, transactions: 
     summary = {"processed": 0, "duplicates": 0, "unmatched": 0, "invalid": 0, "applied": 0}
     results: list[dict[str, Any]] = []
     for tx in transactions:
+        normalized: dict[str, Any] | None = None
         try:
             normalized = normalizer(tx)
             result = payment_service.confirm_provider_transaction(**normalized)
@@ -103,10 +114,27 @@ def _apply_transactions_detailed(payment_service: PaymentService, transactions: 
         except PaymentMatchError as exc:
             summary["processed"] += 1
             summary["unmatched"] += 1
-            results.append({"outcome": "unmatched", "transaction": tx, "error": str(exc)})
+            if normalized:
+                err_text = str(exc).lower()
+                if "payment code not found" in err_text:
+                    status = "missing_code"
+                elif "account" in err_text and "match" in err_text:
+                    status = "account_mismatch"
+                else:
+                    status = "unmatched"
+                payment_service.record_unmatched_event(
+                    provider=normalized["provider"],
+                    provider_tx_id=normalized["provider_tx_id"],
+                    amount_minor=int(normalized["amount_minor"]),
+                    currency=str(normalized["currency"]),
+                    description=str(normalized.get("description") or ""),
+                    raw=normalized.get("raw") if isinstance(normalized.get("raw"), dict) else {"transaction": tx},
+                    status=status,
+                )
+            results.append({"outcome": "unmatched", "transaction": tx, "normalized": normalized, "error": str(exc)})
         except Exception as exc:
             summary["invalid"] += 1
-            results.append({"outcome": "invalid", "transaction": tx, "error": str(exc)})
+            results.append({"outcome": "invalid", "transaction": tx, "normalized": normalized, "error": str(exc)})
     return {"summary": summary, "results": results}
 
 

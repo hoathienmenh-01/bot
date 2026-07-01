@@ -1088,6 +1088,9 @@ class AdminWebService:
     def list_bank_accounts(self, *, include_disabled: bool = True) -> list[dict]:
         return BankAccountService(self.db).list_accounts(include_disabled=include_disabled)
 
+    def get_bank_account(self, account_id: int) -> dict | None:
+        return BankAccountService(self.db).get(account_id)
+
     def create_bank_account(self, data: dict[str, str], *, admin_id: int | None = None) -> int:
         account_id = BankAccountService(self.db).create(data, admin_id=admin_id)
         self.log(admin_id, "bank_account.create", "bank_account", str(account_id), {"label": data.get("label"), "provider": data.get("provider")})

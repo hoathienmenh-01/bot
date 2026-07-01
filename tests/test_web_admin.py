@@ -185,7 +185,60 @@ class WebAdminTest(unittest.TestCase):
             self.assertIn("Mã ngân hàng", settings_page)
             self.assertIn("Giao hàng cho khách", settings_page)
             self.assertIn("Luôn gửi file TXT cho mọi đơn", settings_page)
+            self.assertIn("Không cần sửa code", settings_page)
             self.assertNotIn("Payment intents", settings_page)
+
+            bank_page = opener.open(base + "/bank-accounts").read().decode("utf-8")
+            bank_token = re.search(r'name="csrf" value="([a-f0-9]+)"', bank_page).group(1)
+            post("/bank-accounts/create", {
+                "csrf": bank_token,
+                "label": "MB Pay2S",
+                "bank_name": "MB Bank",
+                "bank_bin": "970422",
+                "account_no": "24301999999",
+                "account_name": "PHAM XUAN TOI",
+                "provider": "pay2s",
+                "api_key": "pay2s-token",
+                "api_secret": "",
+                "base_url": "",
+                "poll_seconds": "30",
+                "is_enabled": "on",
+                "is_default": "on",
+                "return_to": "/bank-accounts",
+            })
+            bank_page = opener.open(base + "/bank-accounts").read().decode("utf-8")
+            self.assertIn("Quản lý nhanh", bank_page)
+            self.assertIn("MB Pay2S", bank_page)
+            self.assertIn("✏️ Sửa", bank_page)
+            self.assertIn("🗑 Xóa", bank_page)
+            edit_page = opener.open(base + "/bank-accounts/edit?id=1").read().decode("utf-8")
+            self.assertIn("Sửa tài khoản ngân hàng", edit_page)
+            self.assertIn("Đã lưu", edit_page)
+            edit_token = re.search(r'name="csrf" value="([a-f0-9]+)"', edit_page).group(1)
+            post("/bank-accounts/update", {
+                "csrf": edit_token,
+                "id": "1",
+                "label": "MB Pay2S Edited",
+                "bank_name": "MB Bank",
+                "bank_bin": "970422",
+                "account_no": "24301999999",
+                "account_name": "PHAM XUAN TOI",
+                "provider": "pay2s",
+                "api_key": "",
+                "api_secret": "",
+                "base_url": "",
+                "poll_seconds": "30",
+                "is_enabled": "on",
+                "is_default": "on",
+                "return_to": "/bank-accounts",
+            })
+            bank_page = opener.open(base + "/bank-accounts").read().decode("utf-8")
+            self.assertIn("MB Pay2S Edited", bank_page)
+            delete_token = re.search(r'name="csrf" value="([a-f0-9]+)"', bank_page).group(1)
+            post("/bank-accounts/delete", {"csrf": delete_token, "id": "1", "return_to": "/bank-accounts"})
+            bank_page = opener.open(base + "/bank-accounts").read().decode("utf-8")
+            self.assertNotIn("MB Pay2S Edited", bank_page)
+
             self.assertIn("Quản lý bot", opener.open(base + "/bots").read().decode("utf-8"))
             self.assertIn("Tạo thông báo bot", opener.open(base + "/notifications").read().decode("utf-8"))
             self.assertIn("Backup/Restore dữ liệu", opener.open(base + "/backup").read().decode("utf-8"))
@@ -639,9 +692,11 @@ class WebSecurityAndWebhookRegressionTest(unittest.TestCase):
             data = json.loads(response.read().decode("utf-8"))
             self.assertEqual(data["status"], "order_delivered")
 
-            order2 = OrderService(self.db).create_order(user_id=user_id, product_id=prod, quantity=1)
+            prod_usdt = self.web.create_product({"category_id": str(cat), "name": "Binance Item", "currency": "USDT", "price": "10", "cost": "0", "description": "", "warranty_text": ""})
+            self.web.add_stock(prod_usdt, "acc-binance")
+            order2 = OrderService(self.db).create_order(user_id=user_id, product_id=prod_usdt, quantity=1)
             binance_intent = PaymentService(self.db).create_order_payment_intent(order_id=order2["id"], provider="binance_pay", expected_user_id=user_id)
-            payload = json.dumps({"tx_id": "BN-TX-1", "amount": "100000", "currency": "VND", "description": binance_intent["public_code"]}).encode("utf-8")
+            payload = json.dumps({"tx_id": "BN-TX-1", "amount": "10", "currency": "USDT", "description": binance_intent["public_code"]}).encode("utf-8")
             sig = hmac.new(b"secret123", payload, hashlib.sha256).hexdigest()
             response = urllib.request.urlopen(urllib.request.Request(base + "/webhook/binance", data=payload, headers={"Content-Type": "application/json", "X-NIMO-Signature": sig}, method="POST"))
             data = json.loads(response.read().decode("utf-8"))
@@ -701,7 +756,7 @@ class WebSecurityAndWebhookRegressionTest(unittest.TestCase):
 
     def test_native_binance_webhook_signature_and_payload_are_supported(self) -> None:
         cat = self.web.create_category("Binance")
-        prod = self.web.create_product({"category_id": str(cat), "name": "Binance Item", "currency": "VND", "price": "100000", "cost": "0", "description": "", "warranty_text": ""})
+        prod = self.web.create_product({"category_id": str(cat), "name": "Binance Item", "currency": "USDT", "price": "10", "cost": "0", "description": "", "warranty_text": ""})
         self.web.add_stock(prod, "binance-native-key")
         user_id = UserService(self.db).get_or_create(777888999, "binance", "Binance Buyer")
         order = OrderService(self.db).create_order(user_id=user_id, product_id=prod, quantity=1)
@@ -715,8 +770,8 @@ class WebSecurityAndWebhookRegressionTest(unittest.TestCase):
                 "bizStatus": "PAY_SUCCESS",
                 "data": {
                     "merchantTradeNo": intent["public_code"],
-                    "orderAmount": "100000",
-                    "currency": "VND",
+                    "orderAmount": "10",
+                    "currency": "USDT",
                     "transactionId": "BN-NATIVE-1",
                 },
             }

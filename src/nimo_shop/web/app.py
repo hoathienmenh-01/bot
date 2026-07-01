@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import timedelta
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, quote
 
 from nimo_shop.db import Database
 from nimo_shop.money import fmt_money, from_minor
@@ -19,6 +19,9 @@ from nimo_shop.payments.binance_pay import BinancePayClient, BinancePayConfig
 from nimo_shop.services.bank_accounts import BankAccountService
 from nimo_shop.services.catalog import CatalogService
 from nimo_shop.services.orders import OrderService, OutOfStock, iso, utcnow
+from nimo_shop.services.payments import PaymentService
+from nimo_shop.services.payment_notices import queue_payment_success_notice
+from nimo_shop.services.provider_sync import apply_pay2s_transactions_detailed, canonical_bank_provider_tx_id
 from nimo_shop.services.users import UserService
 from nimo_shop.services.wallet import InsufficientFunds, WalletService
 from nimo_shop.web.security import create_session, csrf_token, read_session, verify_csrf
@@ -658,30 +661,27 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return str(os.getenv(key) or fallback or "").strip()
 
 
-    def _verify_pay2s_webhook_request(self) -> bool:
-        """Validate Pay2S webhook Authorization: Bearer <webhook_token>.
-
-        Pay2S gives each webhook a token and sends it in the Authorization
-        header. Store that token in the bank account's API secret / Webhook
-        token field for provider=pay2s. If no Pay2S token is configured, reject
-        instead of silently accepting money webhooks.
-        """
+    def _pay2s_webhook_account(self) -> dict[str, Any] | None:
+        """Resolve Pay2S Authorization: Bearer <webhook_token> to one bank account."""
         auth = self.headers.get("Authorization", "").strip()
         if not auth.lower().startswith("bearer "):
-            return False
+            return None
         received = auth.split(" ", 1)[1].strip()
         if not received:
-            return False
+            return None
         try:
             for account in self.service.list_bank_accounts():
                 if str(account.get("provider") or "").lower() != "pay2s":
                     continue
                 token = str(account.get("api_secret") or "").strip()
                 if token and hmac.compare_digest(received, token):
-                    return True
+                    return dict(account)
         except Exception:
-            return False
-        return False
+            return None
+        return None
+
+    def _verify_pay2s_webhook_request(self) -> bool:
+        return self._pay2s_webhook_account() is not None
 
     @staticmethod
     def _pay2s_transactions_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -937,8 +937,9 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                 return
             is_binance_native = parsed.path.endswith("binance") and bool(self.headers.get("BinancePay-Signature"))
             is_pay2s = parsed.path.endswith("pay2s")
+            pay2s_account = self._pay2s_webhook_account() if is_pay2s else None
             if is_pay2s:
-                if not self._verify_pay2s_webhook_request():
+                if not pay2s_account:
                     self._send(json.dumps({"success": False, "error": "invalid_pay2s_token"}, ensure_ascii=False), status=401, content_type="application/json; charset=utf-8")
                     return
             elif is_binance_native:
@@ -951,26 +952,26 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(raw) if raw.strip().startswith("{") else {k: v[-1] for k, v in parse_qs(raw, keep_blank_values=True).items()}
                 if is_pay2s:
-                    results = []
+                    transactions = []
                     for tx in self._pay2s_transactions_from_payload(payload):
-                        # Pay2S webhook format: id/transactionNumber, content,
-                        # transferAmount, transferType=IN. Only incoming rows
-                        # should be reconciled against NAP/ORD codes.
-                        direction = str(tx.get("transferType") or tx.get("type") or "IN").upper()
-                        if direction not in {"IN", "CREDIT", "RECEIVE", "RECEIVED", "+"}:
-                            results.append({"status": "ignored", "reason": "not_incoming"})
-                            continue
-                        result = self.service.ingest_webhook_event(
-                            provider="bank",
-                            tx_id="pay2s:webhook:" + str(tx.get("id") or tx.get("transactionNumber") or tx.get("transaction_id") or tx.get("checksum") or ""),
-                            amount=str(tx.get("transferAmount") or tx.get("amount") or tx.get("amount_in") or "0"),
-                            currency="VND",
-                            description=str(tx.get("content") or tx.get("description") or tx.get("transaction_content") or ""),
-                            raw={"_provider_source": "pay2s_webhook", **tx},
-                        )
-                        results.append(result)
+                        tx = dict(tx)
+                        if pay2s_account:
+                            tx.setdefault("_bank_account_id", int(pay2s_account["id"]))
+                            tx.setdefault("_configured_account_no", str(pay2s_account.get("account_no") or ""))
+                        transactions.append(tx)
+                    detailed = apply_pay2s_transactions_detailed(PaymentService(self.service.db), transactions)
+                    queued_notifications = 0
+                    flat_results = []
+                    for item in detailed.get("results", []):
+                        if queue_payment_success_notice(self.service.db, item):
+                            queued_notifications += 1
+                        result = item.get("result") if isinstance(item, dict) else None
+                        if isinstance(result, dict):
+                            flat_results.append({"outcome": item.get("outcome"), **result})
+                        elif isinstance(item, dict):
+                            flat_results.append({"outcome": item.get("outcome"), "status": item.get("outcome"), "error": item.get("error")})
                     # Pay2S expects HTTP 200 and {success:true} to stop retrying.
-                    self._send(json.dumps({"success": True, "results": results}, ensure_ascii=False), content_type="application/json; charset=utf-8")
+                    self._send(json.dumps({"success": True, "summary": detailed.get("summary", {}), "queued_notifications": queued_notifications, "results": flat_results, "detailed_results": detailed.get("results", [])}, ensure_ascii=False), content_type="application/json; charset=utf-8")
                     return
                 if is_binance_native:
                     parsed_binance = self._parse_binance_webhook_payload(payload)
@@ -985,6 +986,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                         description=parsed_binance["payment_code"],
                         raw={"payment_code": parsed_binance["payment_code"], **payload},
                     )
+                    queue_payment_success_notice(self.service.db, {"outcome": "applied", "result": result})
                 else:
                     # Internal payment intents use provider ids "bank" and
                     # "binance_pay". The public URL names are /webhook/sepay and
@@ -992,12 +994,13 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
                     provider = "bank" if parsed.path.endswith("sepay") else "binance_pay"
                     result = self.service.ingest_webhook_event(
                         provider=provider,
-                        tx_id=str(payload.get("tx_id") or payload.get("id") or payload.get("transaction_id") or payload.get("transactionId") or payload.get("provider_tx_id") or payload.get("reference") or payload.get("bank_transaction_id") or payload.get("code") or ""),
+                        tx_id=canonical_bank_provider_tx_id("sepay", payload.get("tx_id") or payload.get("id") or payload.get("transaction_id") or payload.get("transactionId") or payload.get("provider_tx_id") or payload.get("reference") or payload.get("bank_transaction_id") or payload.get("code") or "") if parsed.path.endswith("sepay") else str(payload.get("tx_id") or payload.get("id") or payload.get("transaction_id") or payload.get("transactionId") or payload.get("provider_tx_id") or payload.get("reference") or payload.get("bank_transaction_id") or payload.get("code") or ""),
                         amount=str(payload.get("amount") or payload.get("amount_in") or payload.get("amountIn") or payload.get("transferAmount") or payload.get("money") or payload.get("creditAmount") or payload.get("value") or "0"),
                         currency=str(payload.get("currency") or "VND"),
                         description=str(payload.get("description") or payload.get("content") or payload.get("transaction_content") or payload.get("transfer_content") or payload.get("note") or payload.get("memo") or payload.get("remark") or ""),
                         raw=payload,
                     )
+                queue_payment_success_notice(self.service.db, {"outcome": "applied", "result": result})
                 self._send(json.dumps(result, ensure_ascii=False), content_type="application/json; charset=utf-8")
             except Exception as exc:
                 self._send(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), status=400, content_type="application/json; charset=utf-8")
@@ -1063,6 +1066,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             return self._page("payments", self._payments(), active="/payments")
         if path == "/bank-accounts":
             return self._page("bank_accounts", self._bank_accounts_page(), active="/bank-accounts")
+        if path == "/bank-accounts/edit":
+            return self._page("bank_accounts", self._bank_account_edit_page(query), active="/bank-accounts")
         if path == "/bots":
             return self._page("bots", self._bots(), active="/bots")
         if path == "/notifications":
@@ -1516,42 +1521,94 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         </form>
         '''
 
+    def _bank_account_actions(self, account: dict[str, Any], *, return_to: str) -> str:
+        account_id = int(account["id"])
+        return_to_safe = esc(return_to)
+        edit_url = f"/bank-accounts/edit?id={account_id}&return_to={quote(return_to, safe='')}"
+        return f"""
+        <div class="action-row bank-actions">
+          <a class="btn secondary small" href="{esc(edit_url)}">✏️ Sửa</a>
+          <form method="post" action="/bank-accounts/default" class="inline-form">
+            {self._form_csrf()}<input type="hidden" name="id" value="{account_id}"><input type="hidden" name="return_to" value="{return_to_safe}">
+            <button class="secondary small">⭐ Đặt mặc định</button>
+          </form>
+          <form method="post" action="/bank-accounts/delete" class="inline-form" onsubmit="return confirm('Xóa tài khoản ngân hàng này? Nếu khách đang dùng mã QR của tài khoản này, hãy kiểm tra lại giao dịch trước khi xóa.');">
+            {self._form_csrf()}<input type="hidden" name="id" value="{account_id}"><input type="hidden" name="return_to" value="{return_to_safe}">
+            <button class="danger small">🗑 Xóa</button>
+          </form>
+        </div>
+        """
+
     def _bank_accounts_panel(self, *, compact: bool = False) -> str:
         rows: list[str] = []
+        quick_rows: list[str] = []
+        return_to = "/settings" if compact else "/bank-accounts"
         for b in self.service.list_bank_accounts():
             provider = str(b.get("provider") or "sepay")
             state = "Mặc định" if b.get("is_default") else ("Bật" if b.get("is_enabled") else "Tắt")
             auto = "Auto SePay" if provider == "sepay" and str(b.get("api_key") or "").strip() else ("Auto Pay2S" if provider == "pay2s" and str(b.get("api_key") or "").strip() else ("QR thủ công" if provider == "manual" else "API lưu cấu hình"))
+            actions = self._bank_account_actions(b, return_to=return_to)
+            quick_rows.append(f"""
+              <tr>
+                <td><b>{esc(b.get('label') or b.get('bank_name'))}</b><br><span class="muted">{esc(b.get('bank_name') or '')}</span></td>
+                <td>{esc(b.get('bank_bin') or '')}<br><code>{esc(b.get('account_no') or '')}</code></td>
+                <td>{esc(provider.upper())}<br><span class="muted">{esc(auto)}</span></td>
+                <td>{status_badge(state)}</td>
+                <td>{actions}</td>
+              </tr>
+            """)
             open_attr = "open" if b.get("is_default") else ""
-            rows.append(f'''
+            rows.append(f"""
             <details class="setup-section" {open_attr}>
               <summary><span>🏦 {esc(b.get('label') or b.get('bank_name'))} · {esc(b.get('account_no'))}</span><span class="pill">{esc(state)} · {esc(auto)}</span></summary>
               <div class="setup-content">
-                {self._bank_account_form(action="/bank-accounts/update", submit_label="Lưu tài khoản", account=b, return_to="/settings" if compact else "/bank-accounts")}
-                <div class="action-row" style="margin-top:12px">
-                  <form method="post" action="/bank-accounts/default">{self._form_csrf()}<input type="hidden" name="id" value="{int(b['id'])}"><button class="secondary small">Đặt mặc định</button></form>
-                  <form method="post" action="/bank-accounts/delete" onsubmit="return confirm('Xóa tài khoản ngân hàng này?');">{self._form_csrf()}<input type="hidden" name="id" value="{int(b['id'])}"><button class="danger small">Xóa</button></form>
-                </div>
+                <div class="hint-box"><b>Quản lý tài khoản này ngay trên Web Admin:</b> bấm <b>Sửa</b> để đổi API/provider/số tài khoản, bấm <b>Xóa</b> để gỡ tài khoản. Không cần vào code hoặc sửa database thủ công.</div>
+                {actions}
+                {self._bank_account_form(action="/bank-accounts/update", submit_label="Lưu tài khoản", account=b, return_to=return_to)}
               </div>
             </details>
-            ''')
+            """)
         empty = '<div class="alert">Chưa có tài khoản ngân hàng. Thêm MB Bank/Vietcombank/ACB ở form bên dưới.</div>' if not rows else ''
         title = "🏦 Tài khoản ngân hàng & API nhận tiền" if compact else "🏦 Tài khoản ngân hàng nhận tiền"
         desc = "Nhập API cho từng ngân hàng/từng tài khoản ngay tại đây. Khách có thể chọn ngân hàng khi nạp tiền; bot tạo VietQR đúng tài khoản." if compact else "Module nhiều tài khoản: khách có thể chọn ngân hàng khi nạp/chuyển khoản. Mỗi tài khoản có Bank BIN, số tài khoản, provider API và API key riêng."
         create_title = "＋ Thêm ngân hàng/API mới" if compact else "Thêm tài khoản ngân hàng"
-        return f'''
-        <div class="card"><div class="section-head"><div><h2>{title}</h2><p class="muted">{desc}</p></div><a class="btn secondary" href="/payments">Xem giao dịch</a></div>
+        quick_table = '' if not quick_rows else f"""
+        <div class="card table-wrap"><div class="section-head"><div><h3>Quản lý nhanh</h3><p class="muted">Các nút Sửa/Xóa/Đặt mặc định hiện rõ tại đây, không cần mở từng khối cấu hình.</p></div></div>
+        <table class="premium-table"><tr><th>Tài khoản</th><th>BIN / STK</th><th>Provider</th><th>Trạng thái</th><th>Thao tác</th></tr>{''.join(quick_rows)}</table></div>
+        """
+        return f"""
+        <div class="card"><div class="section-head"><div><h2>{title}</h2><p class="muted">{desc}</p></div><div class="action-row"><a class="btn secondary" href="/bank-accounts">Trang ngân hàng</a><a class="btn secondary" href="/payments">Xem giao dịch</a></div></div>
+        <div class="hint-box"><b>Không cần sửa code:</b> thêm, sửa, xóa, đổi Pay2S/SePay/Casso/custom, đổi API key và đặt tài khoản mặc định đều làm ở Web Admin.</div>
         {self._bank_provider_help()}
         </div>
-        <div class="card"><h3>{create_title}</h3>{self._bank_account_form(action="/bank-accounts/create", submit_label="Thêm tài khoản", return_to="/settings" if compact else "/bank-accounts")}</div>
-        <div class="card"><h3>Danh sách tài khoản</h3>{empty}{''.join(rows)}</div>
-        '''
+        {quick_table}
+        <div class="card"><h3>{create_title}</h3>{self._bank_account_form(action="/bank-accounts/create", submit_label="Thêm tài khoản", return_to=return_to)}</div>
+        <div class="card"><h3>Danh sách tài khoản chi tiết</h3>{empty}{''.join(rows)}</div>
+        """
+
+    def _bank_account_edit_page(self, query: dict[str, list[str]]) -> str:
+        raw_id = query.get("id", ["0"])[0]
+        try:
+            account_id = int(raw_id)
+        except ValueError:
+            account_id = 0
+        account = self.service.get_bank_account(account_id) if account_id else None
+        return_to = query.get("return_to", ["/bank-accounts"])[0] or "/bank-accounts"
+        if not account:
+            return '<div class="alert">Không tìm thấy tài khoản ngân hàng.</div><a class="btn secondary" href="/bank-accounts">Quay lại</a>'
+        actions = self._bank_account_actions(account, return_to=return_to)
+        return f"""
+        <div class="card"><div class="section-head"><div><h2>✏️ Sửa tài khoản ngân hàng</h2><p class="muted">Đổi ngân hàng, số tài khoản, provider API, Pay2S token, webhook token hoặc trạng thái bật/tắt tại đây.</p></div><a class="btn secondary" href="{esc(return_to)}">← Quay lại</a></div>
+        {actions}
+        {self._bank_account_form(action="/bank-accounts/update", submit_label="Lưu thay đổi", account=account, return_to=return_to)}
+        </div>
+        """
 
     def _bank_accounts_page(self) -> str:
         return self._bank_accounts_panel(compact=False)
 
     def _payments(self) -> str:
-        form = f'<div class="card"><h3>Xác nhận thanh toán thủ công</h3><p class="muted">Dùng khi khách đã chuyển khoản nhưng SePay/Binance chưa tự nhận. Nhập đúng mã ORD... hoặc NAP...</p><form method="post" action="/payments/confirm" class="form-grid">{self._form_csrf()}<label>Mã thanh toán<input name="payment_code" placeholder="ORD... / NAP..." required></label><label>Mã giao dịch / TX ID<input name="tx_id" required placeholder="Mã duy nhất, không nhập trùng"></label><label>Số tiền<input name="amount" required placeholder="150000"></label><label>Tiền tệ<select name="currency"><option>VND</option><option>USDT</option><option>USD</option></select></label><label>Cổng thanh toán<input name="provider" value="bank" placeholder="bank / sepay / binance"></label><button>{tr(self._theme_lang()[0],"confirm_payment")}</button></form></div>'
+        form = f'<div class="card"><h3>Xác nhận thanh toán thủ công</h3><p class="muted">Dùng khi khách đã chuyển khoản nhưng SePay/Binance chưa tự nhận. Nhập đúng mã ORD... hoặc NAP...</p><form method="post" action="/payments/confirm" class="form-grid">{self._form_csrf()}<label>Mã thanh toán<input name="payment_code" placeholder="ORD... / NAP..." required></label><label>Mã giao dịch / TX ID<input name="tx_id" required placeholder="Mã duy nhất, không nhập trùng"></label><label>Số tiền<input name="amount" required placeholder="150000"></label><label>Tiền tệ<select name="currency"><option>VND</option><option>USDT</option><option>USD</option></select></label><label>Cổng thanh toán<input name="provider" value="bank" placeholder="bank / pay2s / sepay / binance_manual / binance_pay / usdt_bep20"></label><button>{tr(self._theme_lang()[0],"confirm_payment")}</button></form></div>'
         events = "".join(f'<tr><td>{e["id"]}</td><td>{esc(e["provider"])}</td><td>{esc(e["provider_tx_id"])}</td><td>{esc(e["payment_code"])}</td><td>{money(e["amount_minor"], e["currency"])}</td><td>{status_badge(e["status"])}</td><td>{esc(e["created_at"])}</td></tr>' for e in self.service.list_payment_events())
         intents = "".join(f'<tr><td>{i["id"]}</td><td>{esc(i["public_code"])}</td><td>{esc(i["provider"])}</td><td>{money(i["amount_minor"], i["currency"])}</td><td>{status_badge(i["status"])}</td><td>{esc(i["created_at"])}</td></tr>' for i in self.service.list_payment_intents())
         return form + f'<div class="grid2"><div class="card"><h3>Mã thanh toán đã tạo</h3><table><tr><th>ID</th><th>Mã</th><th>Cổng</th><th>Tiền</th><th>Trạng thái</th><th>Ngày</th></tr>{intents}</table></div><div class="card"><h3>Giao dịch nhận từ cổng thanh toán</h3><table><tr><th>ID</th><th>Cổng</th><th>TX</th><th>Mã</th><th>Tiền</th><th>Trạng thái</th><th>Ngày</th></tr>{events}</table></div></div>'
