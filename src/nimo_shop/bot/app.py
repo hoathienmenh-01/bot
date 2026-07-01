@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import traceback
 from pathlib import Path
@@ -60,6 +61,17 @@ def build_dispatcher(settings: Settings, db: Database):
     pending_quantity_product_by_tg: dict[int, tuple[int, int, int]] = {}
     pending_preorder_product_by_tg: dict[int, tuple[int, int, int]] = {}
     pending_search_by_tg: set[int] = set()
+    pending_topup_by_tg: dict[int, str] = {}
+
+    def app_setting(key: str, default: str = "") -> str:
+        try:
+            with db.connect() as conn:
+                row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+                if row:
+                    return str(row["value"] or default)
+        except Exception:
+            pass
+        return os.getenv(key, default)
 
 
     async def edit_or_answer_message(message, text: str, *, reply_markup=None) -> None:
@@ -91,18 +103,22 @@ def build_dispatcher(settings: Settings, db: Database):
             pass
 
     def product_local_image_path(product: dict) -> Path | None:
-        rel = str(product.get("product_image_path") or "").strip()
-        if not rel:
+        rel = str(product.get("product_image_path") or "").strip().replace("\\", "/")
+        if not rel or Path(rel).is_absolute() or not rel.startswith("media/products/"):
             return None
-        candidates = [Path(rel)] if Path(rel).is_absolute() else [Path.cwd() / rel]
+        roots = [Path.cwd()]
         try:
-            db_root = Path(db.path).resolve().parent.parent
-            candidates.append(db_root / rel)
+            roots.append(Path(db.path).resolve().parent.parent)
         except Exception:
             pass
-        for path in candidates:
-            if path.exists() and path.is_file():
-                return path
+        for root in roots:
+            media_root = (root / "media" / "products").resolve()
+            path = (root / rel).resolve()
+            try:
+                if path.is_relative_to(media_root) and path.exists() and path.is_file():
+                    return path
+            except ValueError:
+                continue
         return None
 
     async def edit_product_panel(callback, product: dict) -> None:
@@ -323,18 +339,75 @@ def build_dispatcher(settings: Settings, db: Database):
         )
 
     async def send_wallet(message: Message, user_id: int) -> None:
-        await message.answer(views.wallet(wallet.get_balances(user_id)), reply_markup=wallet_keyboard(), parse_mode="HTML")
+        await message.answer(views.wallet(wallet.get_balances(user_id), usdt_network=app_setting("USDT_NETWORK", "BEP20")), reply_markup=wallet_keyboard(), parse_mode="HTML")
 
-    async def send_topup_intent(message: Message, user_id: int, amount_minor: int) -> None:
+    async def send_bank_topup_intent(message: Message, user_id: int, amount_minor: int) -> None:
         if amount_minor <= 0:
             await message.answer("❌ Số tiền nạp phải lớn hơn 0.")
             return
         intent = payments.create_wallet_topup_intent(user_id=user_id, provider="bank", currency="VND", amount_minor=amount_minor)
-        extra, _qr = payment_extra_for_bank(intent)
+        extra, qr = payment_extra_for_bank(intent)
         await message.answer(
             views.payment_instruction(intent, provider_label="ngân hàng", extra=extra),
             parse_mode="HTML",
         )
+        if qr:
+            try:
+                await message.answer_photo(
+                    qr,
+                    caption=(
+                        f"🏦 QR chuyển khoản {views.h(intent['public_code'])}\n"
+                        f"Nội dung chuyển khoản bắt buộc: <code>{views.h(intent['public_code'])}</code>"
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                await message.answer(f"⚠️ Không gửi được QR ngân hàng: <code>{views.h(exc)}</code>", parse_mode="HTML")
+
+    async def send_binance_topup_intent(message: Message, user_id: int, amount_minor: int) -> None:
+        if amount_minor <= 0:
+            await message.answer("❌ Số USDT nạp phải lớn hơn 0.")
+            return
+        intent = payments.create_wallet_topup_intent(user_id=user_id, provider="binance_manual", currency="USDT", amount_minor=amount_minor)
+        await message.answer(
+            views.binance_id_instruction(
+                intent,
+                binance_id=app_setting("BINANCE_PAY_ID", settings.binance_pay_id),
+                note=app_setting("BINANCE_PAY_NOTE", settings.binance_pay_note),
+                title="Nạp ví qua Binance ID",
+            ),
+            parse_mode="HTML",
+        )
+
+    async def send_usdt_bep20_topup_intent(message: Message, user_id: int, amount_minor: int) -> None:
+        if amount_minor <= 0:
+            await message.answer("❌ Số USDT nạp phải lớn hơn 0.")
+            return
+        intent = payments.create_wallet_topup_intent(user_id=user_id, provider="usdt_bep20", currency="USDT", amount_minor=amount_minor)
+        address = app_setting("USDT_BEP20_ADDRESS", settings.usdt_bep20_address)
+        network = app_setting("USDT_NETWORK", "BEP20")
+        await message.answer(
+            views.usdt_bep20_instruction(
+                intent,
+                address=address,
+                tolerance=app_setting("USDT_BEP20_TOLERANCE", settings.usdt_bep20_tolerance),
+                network=network,
+            ),
+            parse_mode="HTML",
+        )
+        if address:
+            try:
+                await message.answer_photo(
+                    views.usdt_qr_url(address),
+                    caption=(
+                        f"USDT receiving address QR ({views.h(network)}):\n"
+                        f"<code>{views.h(address)}</code>\n"
+                        "Quét để copy đúng địa chỉ ví nhận."
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                await message.answer(f"⚠️ Không gửi được QR USDT: <code>{views.h(exc)}</code>", parse_mode="HTML")
     async def create_order_and_show_payment(message: Message, user_id: int, product_id: int, quantity: int) -> None:
         if quantity <= 0:
             await message.answer("❌ Số lượng phải lớn hơn 0.")
@@ -387,12 +460,16 @@ def build_dispatcher(settings: Settings, db: Database):
             await edit_or_answer_by_id(message, chat_id, message_id, f"❌ Không tạo được đơn đặt trước: <code>{views.h(exc)}</code>")
 
     def payment_extra_for_bank(intent: dict) -> tuple[str, str | None]:
-        if settings.bank_bin and settings.bank_account and settings.bank_owner:
+        bank_bin = app_setting("BANK_BIN", settings.bank_bin)
+        bank_account = app_setting("BANK_ACCOUNT", settings.bank_account)
+        bank_owner = app_setting("BANK_OWNER", settings.bank_owner)
+        bank_name = app_setting("BANK_NAME", settings.bank_name)
+        if bank_bin and bank_account and bank_owner:
             bank = BankAccount(
-                bank_bin=settings.bank_bin,
-                account_no=settings.bank_account,
-                account_name=settings.bank_owner,
-                bank_name=settings.bank_name,
+                bank_bin=bank_bin,
+                account_no=bank_account,
+                account_name=bank_owner,
+                bank_name=bank_name,
             )
             instruction = bank_instruction(
                 bank,
@@ -491,9 +568,21 @@ def build_dispatcher(settings: Settings, db: Database):
             return
         try:
             amount_minor = to_minor(parts[1], "VND")
-            await send_topup_intent(message, user_id, amount_minor)
+            await send_bank_topup_intent(message, user_id, amount_minor)
         except Exception as exc:
             await message.answer(f"❌ Số tiền nạp không hợp lệ: <code>{views.h(exc)}</code>", parse_mode="HTML")
+
+    @router.message(Command("napbinance", "topupbinance"))
+    async def topup_binance_command(message: Message):
+        user_id = ensure_user_from_message(message)
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("✍️ Nhập số USDT muốn nạp qua Binance ID: <code>/napbinance 7.24</code>", parse_mode="HTML")
+            return
+        try:
+            await send_binance_topup_intent(message, user_id, to_minor(parts[1], "USDT"))
+        except Exception as exc:
+            await message.answer(f"❌ Số tiền Binance không hợp lệ: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
     @router.message(Command("napusdt", "topupusdt"))
     async def topup_usdt_command(message: Message):
@@ -503,15 +592,7 @@ def build_dispatcher(settings: Settings, db: Database):
             await message.answer("✍️ Nhập số USDT muốn nạp: <code>/napusdt 7.24</code>", parse_mode="HTML")
             return
         try:
-            amount_minor = to_minor(parts[1], "USDT")
-            intent = payments.create_wallet_topup_intent(user_id=user_id, provider="usdt_bep20", currency="USDT", amount_minor=amount_minor)
-            await message.answer(views.usdt_bep20_instruction(intent, address=settings.usdt_bep20_address, tolerance=settings.usdt_bep20_tolerance), parse_mode="HTML")
-            if settings.usdt_bep20_address:
-                await message.answer_photo(
-                    views.usdt_qr_url(settings.usdt_bep20_address),
-                    caption=f"USDT receiving address QR (BEP20):\n<code>{views.h(settings.usdt_bep20_address)}</code>",
-                    parse_mode="HTML",
-                )
+            await send_usdt_bep20_topup_intent(message, user_id, to_minor(parts[1], "USDT"))
         except Exception as exc:
             await message.answer(f"❌ Số tiền USDT không hợp lệ: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
@@ -562,10 +643,25 @@ def build_dispatcher(settings: Settings, db: Database):
         except Exception as exc:
             await message.answer(f"❌ Không tải được đơn: <code>{views.h(exc)}</code>", parse_mode="HTML")
 
-    @router.message(F.text.regexp(r"^\d{1,6}$"))
+    @router.message(F.text.regexp(r"^\d+(?:[\.,]\d{1,6})?$"))
     async def custom_quantity_number(message: Message):
         user_id = ensure_user_from_message(message)
         telegram_id = int(message.from_user.id)
+        topup_mode = pending_topup_by_tg.pop(telegram_id, None)
+        if topup_mode is not None:
+            raw_amount = (message.text or "").strip().replace(",", ".")
+            try:
+                if topup_mode == "bank_vnd":
+                    await send_bank_topup_intent(message, user_id, to_minor(raw_amount, "VND"))
+                elif topup_mode == "binance_usdt":
+                    await send_binance_topup_intent(message, user_id, to_minor(raw_amount, "USDT"))
+                elif topup_mode == "usdt_bep20":
+                    await send_usdt_bep20_topup_intent(message, user_id, to_minor(raw_amount, "USDT"))
+                else:
+                    await message.answer("❌ Kiểu nạp ví không hợp lệ. Hãy bấm Ví → Nạp vào ví lại.")
+            except Exception as exc:
+                await message.answer(f"❌ Số tiền nạp không hợp lệ: <code>{views.h(exc)}</code>", parse_mode="HTML")
+            return
         pending = pending_quantity_product_by_tg.pop(telegram_id, None)
         if pending is not None:
             product_id, chat_id, message_id = pending
@@ -694,7 +790,7 @@ def build_dispatcher(settings: Settings, db: Database):
             return
         try:
             product_id, items = parse_add_stock(message.text or "")
-            inserted = catalog.add_stock(product_id, items)
+            inserted = catalog.add_stock(product_id, items, duplicate_policy=app_setting("STOCK_DUPLICATE_POLICY", "allow"))
             if inserted > 0:
                 product = get_product(product_id) or {"name": f"#{product_id}"}
                 NotificationService(db).queue_product_update(
@@ -1001,8 +1097,20 @@ def build_dispatcher(settings: Settings, db: Database):
         order_id = int(callback.data.split(":", 1)[1])
         try:
             intent = payments.create_order_payment_intent(order_id=order_id, provider="bank", expected_user_id=user_id)
-            extra, _qr = payment_extra_for_bank(intent)
+            extra, qr = payment_extra_for_bank(intent)
             await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="ngân hàng", extra=extra))
+            if qr:
+                try:
+                    await callback.message.answer_photo(
+                        qr,
+                        caption=(
+                            f"🏦 QR chuyển khoản {views.h(intent['public_code'])}\n"
+                            f"Nội dung chuyển khoản bắt buộc: <code>{views.h(intent['public_code'])}</code>"
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception as qr_exc:
+                    await callback.message.answer(f"⚠️ Không gửi được QR ngân hàng: <code>{views.h(qr_exc)}</code>", parse_mode="HTML")
         except Exception as exc:
             await edit_or_answer_callback(callback, f"❌ Không tạo được thanh toán: <code>{views.h(exc)}</code>")
         await callback.answer()
@@ -1043,7 +1151,7 @@ def build_dispatcher(settings: Settings, db: Database):
                 )
                 await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="Binance Pay", extra=extra))
             else:
-                await edit_or_answer_callback(callback, views.binance_id_instruction(intent, binance_id=settings.binance_pay_id, note=settings.binance_pay_note))
+                await edit_or_answer_callback(callback, views.binance_id_instruction(intent, binance_id=app_setting("BINANCE_PAY_ID", settings.binance_pay_id), note=app_setting("BINANCE_PAY_NOTE", settings.binance_pay_note), title="Thanh toán Binance ID"))
         except Exception as exc:
             await edit_or_answer_callback(callback, f"❌ Không tạo được thanh toán Binance: <code>{views.h(exc)}</code>")
         await callback.answer()
@@ -1054,15 +1162,17 @@ def build_dispatcher(settings: Settings, db: Database):
         order_id = int(callback.data.split(":", 1)[1])
         try:
             intent = payments.create_order_payment_intent(order_id=order_id, provider="usdt_bep20", expected_user_id=user_id)
-            await edit_or_answer_callback(callback, views.usdt_bep20_instruction(intent, address=settings.usdt_bep20_address, tolerance=settings.usdt_bep20_tolerance))
-            if settings.usdt_bep20_address:
+            await edit_or_answer_callback(callback, views.usdt_bep20_instruction(intent, address=app_setting("USDT_BEP20_ADDRESS", settings.usdt_bep20_address), tolerance=app_setting("USDT_BEP20_TOLERANCE", settings.usdt_bep20_tolerance), network=app_setting("USDT_NETWORK", "BEP20")))
+            address = app_setting("USDT_BEP20_ADDRESS", settings.usdt_bep20_address)
+            network = app_setting("USDT_NETWORK", "BEP20")
+            if address:
                 try:
                     await callback.message.answer_photo(
-                        views.usdt_qr_url(settings.usdt_bep20_address),
+                        views.usdt_qr_url(address),
                         caption=(
-                            "USDT receiving address QR (BEP20):\n"
-                            f"<code>{views.h(settings.usdt_bep20_address)}</code>\n"
-                            "Scan to copy the correct wallet address."
+                            f"USDT receiving address QR ({views.h(network)}):\n"
+                            f"<code>{views.h(address)}</code>\n"
+                            "Quét để copy đúng địa chỉ ví nhận."
                         ),
                         parse_mode="HTML",
                     )
@@ -1086,52 +1196,45 @@ def build_dispatcher(settings: Settings, db: Database):
     @router.callback_query(F.data == "wallet:open")
     async def cb_wallet_open(callback: CallbackQuery):
         user_id = ensure_user_from_callback(callback)
-        await edit_or_answer_callback(callback, views.wallet(wallet.get_balances(user_id)), reply_markup=wallet_keyboard())
+        await edit_or_answer_callback(callback, views.wallet(wallet.get_balances(user_id), usdt_network=app_setting("USDT_NETWORK", "BEP20")), reply_markup=wallet_keyboard())
         await callback.answer()
 
-    @router.callback_query(F.data == "topupcustom")
-    async def cb_topup_custom(callback: CallbackQuery):
+    @router.callback_query(F.data == "topup:bank")
+    async def cb_topup_bank_start(callback: CallbackQuery):
         ensure_user_from_callback(callback)
+        pending_topup_by_tg[int(callback.from_user.id)] = "bank_vnd"
         await edit_or_answer_callback(
             callback,
-            "✍️ Bạn muốn nạp bao nhiêu?\n\n"
-            "Gửi lệnh theo mẫu: <code>/nap 150000</code>\n"
-            "Có thể nhập số tiền tự do, không bị giới hạn bởi các mức có sẵn.",
+            "🏦 <b>Nạp vào ví</b>\n\n"
+            "Nhập số tiền muốn nạp vào ví (VND):\n"
+            "Ví dụ: <code>100000</code>\n\n"
+            "Bot sẽ tạo mã chuyển khoản riêng và QR ngân hàng cho đúng số tiền bạn nhập.",
         )
         await callback.answer()
 
-    @router.callback_query(F.data.startswith("topupbank:"))
-    async def cb_topup_bank(callback: CallbackQuery):
-        user_id = ensure_user_from_callback(callback)
-        amount_minor = int(callback.data.split(":", 1)[1])
-        try:
-            intent = payments.create_wallet_topup_intent(user_id=user_id, provider="bank", currency="VND", amount_minor=amount_minor)
-            extra, _qr = payment_extra_for_bank(intent)
-            await edit_or_answer_callback(callback, views.payment_instruction(intent, provider_label="ngân hàng", extra=extra))
-        except Exception as exc:
-            await edit_or_answer_callback(callback, f"❌ Không tạo được lệnh nạp: <code>{views.h(exc)}</code>")
-        await callback.answer()
-
-    @router.callback_query(F.data.startswith("topupbinance"))
+    @router.callback_query(F.data == "topup:binance")
     async def cb_topup_binance(callback: CallbackQuery):
         ensure_user_from_callback(callback)
+        pending_topup_by_tg[int(callback.from_user.id)] = "binance_usdt"
         await edit_or_answer_callback(
             callback,
-            "🟡 <b>Nạp ví qua Binance</b>\n\n"
-            "Gửi lệnh: <code>/napusdt 7.24</code> để tạo mã nạp USDT/Binance theo số tiền tự do.\n"
-            "Sau khi thanh toán, hệ thống/admin xác nhận sẽ cộng vào ví USD/USDT.",
-            reply_markup=wallet_keyboard(),
+            "🟡 <b>Nạp ví qua Binance ID</b>\n\n"
+            "Nhập số USDT muốn nạp qua Binance:\n"
+            "Ví dụ: <code>10.5</code>\n\n"
+            "Bot sẽ tạo mã nạp riêng, hiển thị Binance ID và số tiền cần chuyển.",
         )
         await callback.answer()
 
-    @router.callback_query(F.data.startswith("topupusdt"))
+    @router.callback_query(F.data == "topup:usdt_bep20")
     async def cb_topup_usdt(callback: CallbackQuery):
         ensure_user_from_callback(callback)
+        pending_topup_by_tg[int(callback.from_user.id)] = "usdt_bep20"
         await edit_or_answer_callback(
             callback,
             "🌕 <b>Nạp ví USDT (BEP20)</b>\n\n"
-            "Gửi lệnh: <code>/napusdt 7.24</code> để tạo mã nạp USDT và nhận địa chỉ/QR BEP20.",
-            reply_markup=wallet_keyboard(),
+            "Nhập số USDT muốn nạp qua BEP20:\n"
+            "Ví dụ: <code>25.5</code>\n\n"
+            "Bot sẽ tạo mã nạp riêng, địa chỉ ví nhận và QR.",
         )
         await callback.answer()
 

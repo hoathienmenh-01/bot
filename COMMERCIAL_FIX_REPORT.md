@@ -1,75 +1,118 @@
-# NIMO Telegram Shop Bot v2.8.1 Commercial Hardening Fix Report
+# NIMO Telegram Shop Bot - Commercial Release Fix Report
 
-## Scope
-This build fixes the production-blocking issues found in the commercial review: webhook/auth hardening, payment reconciliation, preorder money safety, zero-price checkout, backup safety, admin notifications, and buyer API idempotency.
+## Build reviewed
+Source package: `nimo_telegram_shop_bot_v2_8_1_commercial_hardened(1).zip`
+Fixed package version: `v2.8.2-commercial-ready`
 
-## Main fixes
+## Critical fixes completed
 
-1. Webhook security
-   - `/webhook/sepay` and `/webhook/binance` now reject unsigned requests when `WEBHOOK_SHARED_SECRET` is missing or invalid.
-   - HMAC verification through `X-NIMO-Signature` and direct secret through `X-NIMO-Webhook-Secret` are supported.
+### 1. Preorder deposit safety
+Fixed a commercial money-loss bug where preorders were marked `fulfilled` immediately after stock arrived, even when the buyer still had an unpaid remaining-balance order.
 
-2. Web Admin security
-   - Removed unsafe default `admin/admin12345` bootstrap.
-   - Removed fixed `change-this-web-session-secret` fallback.
-   - Public Web Admin requires a strong `WEB_SESSION_SECRET`; localhost may use a temporary in-memory secret for setup.
-   - Login cookie can use `Secure` with `WEB_COOKIE_SECURE=true`.
+New behavior:
+- A paid preorder stays `active` while the linked remaining-payment order is awaiting payment.
+- `preorders.status='fulfilled'` is set only after the linked order is delivered.
+- Expired/cancelled remaining-payment orders release stock but do not erase the preorder deposit state.
+- Cancelling an active preorder also cancels any pending linked remaining-payment order and refunds the deposit exactly once.
 
-3. Payment safety
-   - Payment/order/preorder public codes now use larger random suffixes.
-   - Legacy 8-hex payment codes remain reconcilable.
-   - Previously `unmatched` external transactions can be reconciled later with the same `provider_tx_id` after admin supplies the correct payment code.
-   - Zero-amount orders no longer create external payment intents.
+Files changed:
+- `src/nimo_shop/services/preorders.py`
+- `src/nimo_shop/services/orders.py`
+- `src/nimo_shop/db.py`
 
-4. Preorder safety
-   - Cancelling a paid active preorder refunds the deposit into the buyer wallet exactly once.
-   - Full-deposit preorders auto-deliver when stock arrives.
-   - Web Admin fulfill no longer marks a preorder fulfilled unless it creates/delivers the corresponding order.
+Schema migration:
+- Added `orders.preorder_id`.
+- Added `idx_orders_preorder_status`.
 
-5. Backup/restore safety
-   - Backup download defaults to excluding `.env`.
-   - Restore rejects `media/products` path traversal attempts.
-   - Clearing product images only deletes files under `media/products`.
+Regression tests added:
+- `test_preorder_remaining_order_expiry_does_not_lose_deposit`
+- `test_preorder_fulfilled_only_after_remaining_payment_is_paid`
 
-6. Buyer API hardening
-   - `POST /api/telegram-buyer/purchase` supports `Idempotency-Key` or JSON `idempotency_key`.
-   - API order expiry now uses configured `ORDER_EXPIRES_MINUTES`.
-   - Banned users cannot create orders/preorders.
+### 2. Atomic Buyer API purchase/idempotency
+Fixed non-atomic Buyer API idempotency. Previously two parallel requests with the same idempotency key could both create/pay/deliver orders before the response was stored.
 
-7. Notifications and operations
-   - Telegram admin `/confirm`, `/cancel`, `/refund`, and `/addstock` queue buyer/preorder notifications consistently with Web Admin.
-   - Notification loop marks all-failed/no-recipient sends as failed instead of sent.
+New behavior:
+- Buyer API reserves the idempotency key inside the same `BEGIN IMMEDIATE` transaction before reserving stock or debiting wallet.
+- Order creation, wallet debit, delivery, and idempotency response storage are now one transaction.
+- Repeated calls with the same idempotency key return the exact same response and do not debit twice.
 
-## Verification
+Files changed:
+- `src/nimo_shop/web/app.py`
+- `src/nimo_shop/services/orders.py`
+
+Regression test added:
+- `test_buyer_api_idempotency_key_returns_same_purchase_once`
+
+### 3. Native Binance Pay webhook verification
+Fixed Binance webhook handling so the system supports native Binance Pay webhook headers/signatures instead of only the internal `X-NIMO-*` signature.
+
+New behavior:
+- `/webhook/binance` supports native `BinancePay-Timestamp`, `BinancePay-Nonce`, and `BinancePay-Signature` verification with `BINANCE_PAY_SECRET_KEY`.
+- Parses native Binance payload fields such as `bizStatus`, `data.merchantTradeNo`, `data.orderAmount`, `data.currency`, and `data.transactionId`.
+- Keeps backward-compatible internal signed webhook support for proxy/testing flows.
+
+Files changed:
+- `src/nimo_shop/web/app.py`
+
+Regression test added:
+- `test_native_binance_webhook_signature_and_payload_are_supported`
+
+### 4. Safer product image handling
+Fixed product image upload logic so invalid product IDs cannot leave orphan image files behind. Bot-side product image loading now refuses absolute paths and only serves files under `media/products/`.
+
+Files changed:
+- `src/nimo_shop/web/service.py`
+- `src/nimo_shop/bot/app.py`
+
+### 5. Safer wallet user reference resolution
+Fixed a money-risk issue where a numeric Telegram ID could fall back to an internal DB user ID and credit/debit the wrong user.
+
+New behavior:
+- `tg:123456789` or plain numeric input means Telegram ID.
+- `id:12` means internal DB ID.
+- `@username` or username resolves username.
+- Plain numeric input no longer falls back to internal DB ID.
+
+File changed:
+- `src/nimo_shop/web/service.py`
+
+### 6. Admin login brute-force guard
+Added basic brute-force protection for Web Admin login.
+
+New behavior:
+- Failed login attempts are tracked per IP + username.
+- 5 failed attempts lock login for 15 minutes.
+- Successful login clears failed attempts.
+
+Files changed:
+- `src/nimo_shop/web/service.py`
+- `src/nimo_shop/web/app.py`
+
+### 7. Production cookie guard
+Added production guard requiring `WEB_COOKIE_SECURE=true` when `APP_ENV=production`.
+
+Files changed:
+- `src/nimo_shop/web/app.py`
+- `.env.example`
+
+### 8. Bot `/addstock` duplicate policy consistency
+Telegram admin `/addstock` now reads `STOCK_DUPLICATE_POLICY` from `app_settings` when available, instead of only using environment defaults.
+
+File changed:
+- `src/nimo_shop/bot/app.py`
+
+## Test result
 
 ```bash
-python3 -m compileall -q src tests
+PYTHONPATH=src python3 -m compileall -q src tests
 PYTHONPATH=src python3 -m pytest -q
 ```
 
 Result:
 
 ```text
-81 passed
+85 passed in 9.34s
 ```
 
-Additional demo audit check:
-
-```text
-Seeded demo categories/products/stock.
-AUDIT_ISSUES 0
-```
-
-## Production notes
-
-Before opening the shop publicly, set these in `.env`:
-
-```env
-WEB_ADMIN_PASSWORD=<strong password>
-WEB_SESSION_SECRET=<random string at least 32 characters>
-WEBHOOK_SHARED_SECRET=<random webhook secret>
-BOT_TOKEN=<BotFather token>
-ADMIN_IDS=<your Telegram numeric id>
-```
-
-Do not expose Web Admin directly to the public internet without HTTPS/VPN/reverse proxy access control.
+## Release note
+This version is safer for a commercial launch than the submitted build. The main remaining operational requirements are external: deploy behind HTTPS, set strong secrets, configure real payment provider credentials, test one small real payment end-to-end, and keep backups enabled.

@@ -1,3 +1,13 @@
+
+## v2.8.4 - Wallet Top-up Flow Fix
+
+- Removed fixed top-up amount buttons from the Telegram wallet screen.
+- Wallet now shows only current balances: VND and USDT with network label.
+- Added interactive custom amount flow for bank, Binance ID, and USDT BEP20 top-ups.
+- Bank top-ups/orders now show the unique NAP/ORD transfer code and send VietQR image to the customer.
+- Binance ID and USDT BEP20 top-ups now create separate payment intents with unique payment codes for admin/webhook reconciliation.
+- Added `USDT_NETWORK` setting so the displayed wallet/network label can be changed between BEP20/TRC20 when needed.
+
 # CHANGELOG
 
 ## v2.8.1 - Commercial hardening production fix
@@ -170,3 +180,16 @@
 - Backup ZIP now includes `media/products/` and restore extracts product images.
 - Added tests for product media upload, backup media inclusion, custom emoji rendering and image/no-image product views.
 - Full test suite: 61 tests passing, compileall OK, seed demo OK, audit OK.
+
+## v2.8.2-commercial-ready
+
+- Fixed preorder deposit state machine so preorders are not marked fulfilled until actual delivery.
+- Added `orders.preorder_id` migration and linked preorder fulfillment to delivered orders.
+- Made Buyer API wallet purchase and idempotency atomic in one transaction.
+- Added native Binance Pay webhook signature verification and payload parsing.
+- Hardened product image path handling and prevented orphan files for invalid product IDs.
+- Made wallet user reference resolution explicit/safe to avoid crediting the wrong user.
+- Added Web Admin login brute-force lockout.
+- Added `APP_ENV=production` guard requiring `WEB_COOKIE_SECURE=true`.
+- Synced Telegram `/addstock` duplicate policy with web `app_settings`.
+- Added commercial regression tests; full suite now passes: `85 passed`.

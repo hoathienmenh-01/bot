@@ -46,6 +46,7 @@ class Settings:
     binance_pay_note: str = ""
     usdt_bep20_address: str = ""
     usdt_bep20_tolerance: str = "0.02"
+    usdt_network: str = "BEP20"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -77,4 +78,5 @@ class Settings:
             binance_pay_note=os.getenv("BINANCE_PAY_NOTE", "").strip(),
             usdt_bep20_address=os.getenv("USDT_BEP20_ADDRESS", "").strip(),
             usdt_bep20_tolerance=os.getenv("USDT_BEP20_TOLERANCE", "0.02").strip(),
+            usdt_network=os.getenv("USDT_NETWORK", "BEP20").strip().upper(),
         )

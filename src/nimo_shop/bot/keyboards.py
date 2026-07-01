@@ -14,9 +14,6 @@ ADMIN_MENU = [
     ["👥 Khách hàng", "📊 Thống kê"],
 ]
 
-TOPUP_AMOUNTS_VND = [50_000, 100_000, 200_000, 500_000]
-
-
 def build_reply_keyboard(rows: list[list[str]], *, placeholder: str = "Chọn chức năng..."):
     try:
         from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
@@ -136,12 +133,15 @@ def preorder_payment_keyboard(preorder_id: int):
 
 
 def wallet_keyboard_rows() -> list[list[tuple[str, str]]]:
-    rows = [[(f"🏦 Nạp ngân hàng {amount:,}đ".replace(",", "."), f"topupbank:{amount}")] for amount in TOPUP_AMOUNTS_VND]
-    rows.append([("🟡 Top up with Binance", "topupbinance:custom")])
-    rows.append([("🌕 Top up USDT (BEP20)", "topupusdt:custom")])
-    rows.append([("✍️ Nạp số tiền khác", "topupcustom")])
-    rows.append([("🔄 Làm mới số dư", "wallet:open"), ("🏠 Menu", "menu:main")])
-    return rows
+    # Commercial wallet UX: do not suggest fixed top-up amounts. The customer
+    # chooses any amount, then the bot creates a unique payment code/QR for that
+    # exact amount so bank/crypto reconciliation can match the transaction.
+    return [
+        [("🏦 Nạp vào ví", "topup:bank")],
+        [("🟡 Nạp qua Binance ID", "topup:binance")],
+        [("🌕 Nạp USDT (BEP20)", "topup:usdt_bep20")],
+        [("🔄 Cập nhật số dư", "wallet:open"), ("🏠 Menu", "menu:main")],
+    ]
 
 
 def wallet_keyboard():

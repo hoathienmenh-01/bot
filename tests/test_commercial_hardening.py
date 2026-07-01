@@ -42,7 +42,8 @@ class CommercialHardeningRegressionTest(unittest.TestCase):
             currency="VND",
             price_minor=price_minor,
         )
-        CatalogService(self.db).add_stock(product_id, [f"key-{i}" for i in range(stock)])
+        if stock > 0:
+            CatalogService(self.db).add_stock(product_id, [f"key-{i}" for i in range(stock)])
         return product_id
 
     def test_unmatched_payment_can_be_reconciled_with_same_provider_tx_id(self) -> None:
@@ -138,6 +139,43 @@ class CommercialHardeningRegressionTest(unittest.TestCase):
             conn.execute("UPDATE users SET is_banned=1 WHERE id=?", (self.user_id,))
         with self.assertRaises(PermissionError):
             OrderService(self.db).create_order(user_id=self.user_id, product_id=product_id)
+
+    def test_preorder_remaining_order_expiry_does_not_lose_deposit(self) -> None:
+        product_id = self._product_with_stock(stock=0)
+        WalletService(self.db).credit(self.user_id, "VND", 100_000, reason="fund", idempotency_key="fund-preorder-expiry")
+        service = PreorderService(self.db, deposit_percent=10)
+        preorder = service.create_preorder(user_id=self.user_id, product_id=product_id)
+        service.pay_deposit_with_wallet(preorder["id"], expected_user_id=self.user_id)
+        CatalogService(self.db).add_stock(product_id, ["reserved-for-preorder"])
+        created = service.create_payment_orders_for_available_stock(product_id)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["status"], "awaiting_payment")
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE orders SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?", (created[0]["id"],))
+        self.assertEqual(OrderService(self.db).sweep_expired(), 1)
+        with self.db.connect() as conn:
+            self.assertEqual(conn.execute("SELECT status FROM preorders WHERE id=?", (preorder["id"],)).fetchone()["status"], "active")
+            self.assertEqual(conn.execute("SELECT status FROM orders WHERE id=?", (created[0]["id"],)).fetchone()["status"], "cancelled")
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM stock_items WHERE product_id=? AND status='available'", (product_id,)).fetchone()["c"], 1)
+        self.assertEqual(WalletService(self.db).get_balances(self.user_id)["VND"], 90_000)
+
+    def test_preorder_fulfilled_only_after_remaining_payment_is_paid(self) -> None:
+        product_id = self._product_with_stock(stock=0)
+        WalletService(self.db).credit(self.user_id, "VND", 100_000, reason="fund", idempotency_key="fund-preorder-remaining")
+        service = PreorderService(self.db, deposit_percent=10)
+        preorder = service.create_preorder(user_id=self.user_id, product_id=product_id)
+        service.pay_deposit_with_wallet(preorder["id"], expected_user_id=self.user_id)
+        CatalogService(self.db).add_stock(product_id, ["preorder-final-key"])
+        created = service.create_payment_orders_for_available_stock(product_id)[0]
+        with self.db.connect() as conn:
+            self.assertEqual(conn.execute("SELECT status FROM preorders WHERE id=?", (preorder["id"],)).fetchone()["status"], "active")
+        paid = OrderService(self.db).pay_with_wallet(created["id"], expected_user_id=self.user_id)
+        self.assertEqual(paid["order"]["status"], "delivered")
+        with self.db.connect() as conn:
+            self.assertEqual(conn.execute("SELECT status FROM preorders WHERE id=?", (preorder["id"],)).fetchone()["status"], "fulfilled")
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM deliveries WHERE order_id=?", (created["id"],)).fetchone()["c"], 1)
+        self.assertEqual(WalletService(self.db).get_balances(self.user_id).get("VND", 0), 0)
+
 
 
 if __name__ == "__main__":

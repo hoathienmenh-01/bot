@@ -80,8 +80,9 @@ class BotCompletionTest(unittest.TestCase):
         self.assertIn("Lịch sử mua", views.history(self.orders.order_history(self.user_id)))
         self.assertIn("Quản lý dòng tiền", views.finance(__import__("nimo_shop.services.finance", fromlist=["FinanceService"]).FinanceService(self.db).summary()))
         keyboard_text = str(wallet_keyboard_rows())
-        self.assertIn("Nạp số tiền khác", keyboard_text)
-        self.assertIn("topupcustom", keyboard_text)
+        self.assertIn("Nạp vào ví", keyboard_text)
+        self.assertIn("topup:bank", keyboard_text)
+        self.assertNotIn("Nạp ngân hàng 50.000đ", keyboard_text)
 
 
     def test_quantity_purchase_ui_and_wallet_balance_are_visible(self) -> None:

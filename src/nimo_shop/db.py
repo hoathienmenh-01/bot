@@ -101,11 +101,13 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     paid_at TEXT,
     delivered_at TEXT,
+    preorder_id INTEGER,
     FOREIGN KEY(user_id) REFERENCES users(id),
     FOREIGN KEY(product_id) REFERENCES products(id)
 );
 CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_expires ON orders(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_orders_preorder_status ON orders(preorder_id, status);
 CREATE TABLE IF NOT EXISTS deliveries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id INTEGER NOT NULL,
@@ -311,6 +313,11 @@ class Database:
             conn.execute("DROP TABLE stock_items")
             conn.execute("ALTER TABLE stock_items_v26 RENAME TO stock_items")
             conn.execute("PRAGMA foreign_keys=ON")
+
+        order_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(orders)")}
+        if "preorder_id" not in order_cols:
+            conn.execute("ALTER TABLE orders ADD COLUMN preorder_id INTEGER")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_preorder_status ON orders(preorder_id, status)")
 
         product_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(products)")}
         migrations = {

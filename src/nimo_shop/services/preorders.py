@@ -112,6 +112,15 @@ class PreorderService:
             if preorder["status"] in {"fulfilled", "refunded"}:
                 raise PreorderStateError(f"cannot cancel preorder in state {preorder['status']}")
             deposit = int(preorder["deposit_amount_minor"] or 0)
+            pending_orders = conn.execute(
+                "SELECT id FROM orders WHERE preorder_id=? AND status='awaiting_payment' ORDER BY id",
+                (preorder_id,),
+            ).fetchall()
+            for pending in pending_orders:
+                # Release stock reserved for a remaining-payment order before
+                # refunding the deposit, otherwise cancelling a preorder can leave
+                # stock locked until the normal expiry sweep.
+                OrderService._cancel_in_conn(conn, int(pending["id"]), "preorder_cancelled")
             if preorder["status"] == "active" and deposit > 0:
                 balance = WalletService.credit_in_conn(
                     conn,
@@ -141,42 +150,7 @@ class PreorderService:
         return self.create_payment_order_for_preorder(preorder_id)
 
     @staticmethod
-    def _create_order_from_preorder_in_conn(conn, pr: dict, *, order_expires_minutes: int) -> dict | None:
-        qty = int(pr["quantity"])
-        stock = conn.execute(
-            "SELECT id FROM stock_items WHERE product_id=? AND status='available' ORDER BY id LIMIT ?",
-            (int(pr["product_id"]), qty),
-        ).fetchall()
-        if len(stock) < qty:
-            return None
-        now = datetime.now(timezone.utc)
-        expires_at = iso(now + timedelta(minutes=order_expires_minutes))
-        order_code = public_code("ORD")
-        remaining = max(0, int(pr["total_amount_minor"]) - int(pr.get("deposit_amount_minor") or 0))
-        unit_remaining = (remaining + qty - 1) // qty if qty > 0 else remaining
-        cur = conn.execute(
-            """
-            INSERT INTO orders(public_code, user_id, product_id, quantity, currency, unit_amount_minor, total_amount_minor, status, payment_method, expires_at)
-            VALUES(?,?,?,?,?,?,?,'awaiting_payment','preorder_remaining',?)
-            """,
-            (order_code, int(pr["user_id"]), int(pr["product_id"]), qty, pr["currency"], unit_remaining, remaining, expires_at),
-        )
-        order_id = int(cur.lastrowid)
-        updated = 0
-        for item in stock:
-            updated += conn.execute(
-                """
-                UPDATE stock_items
-                   SET status='reserved', reserved_by_user_id=?, reserved_order_id=?, reserved_until=?
-                 WHERE id=? AND status='available'
-                """,
-                (int(pr["user_id"]), order_id, expires_at, int(item["id"])),
-            ).rowcount
-        if updated != qty:
-            raise RuntimeError("stock was reserved by another transaction")
-        if remaining == 0:
-            OrderService._mark_paid_and_deliver_in_conn(conn, order_id, "preorder_deposit")
-        conn.execute("UPDATE preorders SET status='fulfilled', fulfilled_at=? WHERE id=?", (_now_iso(), int(pr["id"])))
+    def _order_payload_for_preorder(conn, order_id: int, pr: dict) -> dict:
         order = conn.execute(
             """
             SELECT o.*, p.name AS product_name, u.telegram_id
@@ -187,7 +161,57 @@ class PreorderService:
             """,
             (order_id,),
         ).fetchone()
+        if not order:
+            raise ValueError("order not found")
         return {**dict(order), "preorder_code": pr["public_code"], "deposit_amount_minor": int(pr.get("deposit_amount_minor") or 0)}
+
+    @staticmethod
+    def _create_order_from_preorder_in_conn(conn, pr: dict, *, order_expires_minutes: int) -> dict | None:
+        qty = int(pr["quantity"])
+
+        # If an active preorder already has a pending remaining-payment order,
+        # do not create another order or reserve more stock. This makes repeated
+        # admin clicks/import hooks idempotent. Expired linked orders are cancelled
+        # first so stock is released and the preorder can be retried safely.
+        existing = conn.execute(
+            "SELECT * FROM orders WHERE preorder_id=? AND status='awaiting_payment' ORDER BY id DESC LIMIT 1",
+            (int(pr["id"]),),
+        ).fetchone()
+        if existing:
+            existing_dict = dict(existing)
+            if OrderService._is_expired(existing_dict):
+                OrderService._cancel_in_conn(conn, int(existing["id"]), "expired")
+            else:
+                return PreorderService._order_payload_for_preorder(conn, int(existing["id"]), pr)
+
+        stock = conn.execute(
+            "SELECT id FROM stock_items WHERE product_id=? AND status='available' ORDER BY id LIMIT ?",
+            (int(pr["product_id"]), qty),
+        ).fetchall()
+        if len(stock) < qty:
+            return None
+        now = datetime.now(timezone.utc)
+        expires_at = iso(now + timedelta(minutes=order_expires_minutes))
+        remaining = max(0, int(pr["total_amount_minor"]) - int(pr.get("deposit_amount_minor") or 0))
+        unit_remaining = (remaining + qty - 1) // qty if qty > 0 else remaining
+        order = OrderService._create_order_in_conn(
+            conn,
+            user_id=int(pr["user_id"]),
+            product_id=int(pr["product_id"]),
+            quantity=qty,
+            expires_at=expires_at,
+            payment_method="preorder_remaining",
+            total_amount_minor=remaining,
+            unit_amount_minor=unit_remaining,
+            preorder_id=int(pr["id"]),
+        )
+        order_id = int(order["id"])
+        if remaining == 0:
+            OrderService._mark_paid_and_deliver_in_conn(conn, order_id, "preorder_deposit")
+        # Do not mark preorder fulfilled for non-zero remaining payments. It is
+        # fulfilled only from OrderService._mark_paid_and_deliver_in_conn after
+        # the linked order is actually delivered. This prevents lost deposits.
+        return PreorderService._order_payload_for_preorder(conn, order_id, pr)
 
     def create_payment_order_for_preorder(self, preorder_id: int) -> dict:
         with self.db.transaction() as conn:

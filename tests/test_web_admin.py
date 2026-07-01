@@ -490,7 +490,9 @@ class WebAdminV25CategoryPreorderTest(unittest.TestCase):
         self.assertEqual(self.web.list_preorders()[0]["id"], pr["id"])
         order = self.web.fulfill_preorder(pr["id"], admin_id=admin_id)
         self.assertEqual(order["status"], "awaiting_payment")
-        self.assertEqual(self.web.list_preorders(status="fulfilled")[0]["id"], pr["id"])
+        # Commercial fix: a preorder with unpaid remaining balance must stay active
+        # until the linked order is actually paid and delivered.
+        self.assertEqual(self.web.list_preorders(status="active")[0]["id"], pr["id"])
         self.web.update_settings({"PREORDER_DEPOSIT_PERCENT": "15"}, admin_id=admin_id, write_env=True)
         self.assertIn("PREORDER_DEPOSIT_PERCENT=15", (self.root / ".env").read_text(encoding="utf-8"))
 
@@ -542,6 +544,34 @@ class BuyerApiTest(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_buyer_api_idempotency_key_returns_same_purchase_once(self) -> None:
+        cat = CatalogService(self.db).add_category("API")
+        prod = CatalogService(self.db).add_product(category_id=cat, name="API Item", description="", currency="VND", price_minor=50_000)
+        CatalogService(self.db).add_stock(prod, ["one", "two"])
+        users = UserService(self.db)
+        user_id = users.get_or_create(123123123, "idem", "Idem User")
+        api_key = users.ensure_api_key(user_id)
+        WalletService(self.db).credit(user_id, "VND", 100_000, reason="test", idempotency_key="api-idem-credit")
+        server = create_server(str(self.db_path), host="127.0.0.1", port=0, session_secret="secret", project_root=self.root, bootstrap_username="owner", bootstrap_password="StrongPass123")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            body = json.dumps({"product_id": prod, "quantity": 1, "idempotency_key": "buy-once"}).encode("utf-8")
+            headers = {"X-API-Key": api_key, "Content-Type": "application/json", "Idempotency-Key": "buy-once"}
+            first = json.loads(urllib.request.urlopen(urllib.request.Request(base + "/api/telegram-buyer/purchase", data=body, method="POST", headers=headers)).read().decode("utf-8"))
+            second = json.loads(urllib.request.urlopen(urllib.request.Request(base + "/api/telegram-buyer/purchase", data=body, method="POST", headers=headers)).read().decode("utf-8"))
+            self.assertEqual(first, second)
+            with self.db.connect() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM orders WHERE user_id=?", (user_id,)).fetchone()["c"], 1)
+                self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM deliveries", ()).fetchone()["c"], 1)
+            self.assertEqual(WalletService(self.db).get_balances(user_id)["VND"], 50_000)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+
 class WebSecurityAndWebhookRegressionTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -592,6 +622,53 @@ class WebSecurityAndWebhookRegressionTest(unittest.TestCase):
             response = urllib.request.urlopen(urllib.request.Request(base + "/webhook/binance", data=payload, headers={"Content-Type": "application/json", "X-NIMO-Signature": sig}, method="POST"))
             data = json.loads(response.read().decode("utf-8"))
             self.assertEqual(data["status"], "order_delivered")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+
+    def test_native_binance_webhook_signature_and_payload_are_supported(self) -> None:
+        cat = self.web.create_category("Binance")
+        prod = self.web.create_product({"category_id": str(cat), "name": "Binance Item", "currency": "VND", "price": "100000", "cost": "0", "description": "", "warranty_text": ""})
+        self.web.add_stock(prod, "binance-native-key")
+        user_id = UserService(self.db).get_or_create(777888999, "binance", "Binance Buyer")
+        order = OrderService(self.db).create_order(user_id=user_id, product_id=prod, quantity=1)
+        intent = PaymentService(self.db).create_order_payment_intent(order_id=order["id"], provider="binance_pay", expected_user_id=user_id)
+        owner = self.web.authenticate("owner", "StrongPass123")
+        secret = "native-binance-secret"
+        self.web.update_settings({"BINANCE_PAY_SECRET_KEY": secret}, admin_id=int(owner["id"]))
+        server, thread, base = self._serve()
+        try:
+            payload_obj = {
+                "bizStatus": "PAY_SUCCESS",
+                "data": {
+                    "merchantTradeNo": intent["public_code"],
+                    "orderAmount": "100000",
+                    "currency": "VND",
+                    "transactionId": "BN-NATIVE-1",
+                },
+            }
+            raw = json.dumps(payload_obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            timestamp = "1710000000000"
+            nonce = "nonce123"
+            sig_payload = f"{timestamp}\n{nonce}\n{raw.decode('utf-8')}\n"
+            signature = hmac.new(secret.encode(), sig_payload.encode(), hashlib.sha512).hexdigest().upper()
+            response = urllib.request.urlopen(urllib.request.Request(
+                base + "/webhook/binance",
+                data=raw,
+                headers={
+                    "Content-Type": "application/json",
+                    "BinancePay-Timestamp": timestamp,
+                    "BinancePay-Nonce": nonce,
+                    "BinancePay-Signature": signature,
+                },
+                method="POST",
+            ))
+            data = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(data["status"], "order_delivered")
+            with self.db.connect() as conn:
+                self.assertEqual(conn.execute("SELECT status FROM orders WHERE id=?", (order["id"],)).fetchone()["status"], "delivered")
         finally:
             server.shutdown()
             server.server_close()

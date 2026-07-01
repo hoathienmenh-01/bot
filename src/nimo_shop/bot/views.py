@@ -221,29 +221,30 @@ def payment_instruction(intent: dict, *, provider_label: str, extra: str = "") -
 
 
 
-def binance_id_instruction(intent: dict, *, binance_id: str, note: str = "") -> str:
-    memo = note.strip() or "Gửi đúng số tiền, sau đó gửi ID giao dịch hoặc liên hệ admin để xác minh."
+def binance_id_instruction(intent: dict, *, binance_id: str, note: str = "", title: str = "Nạp ví qua Binance") -> str:
+    memo = note.strip() or "Sau khi chuyển, gửi ID giao dịch hoặc ảnh giao dịch cho admin để xác minh."
     return (
-        f"🟡 <b>Thanh toán Binance</b>\n\n"
-        f"Mã thanh toán: <code>{h(intent['public_code'])}</code>\n"
-        f"Binance ID: <code>{h(binance_id or 'Chưa cấu hình')}</code>\n"
+        f"🟡 <b>{h(title)}</b>\n\n"
+        f"Binance ID: <code>{h(binance_id or 'Chưa cấu hình BINANCE_PAY_ID')}</code>\n"
         f"Số tiền cần chuyển: <b>{fmt_money(int(intent['amount_minor']), intent['currency'])}</b>\n"
+        f"Mã nạp/xác nhận: <code>{h(intent['public_code'])}</code>\n"
         f"Hết hạn: <code>{h(intent['expires_at'])}</code>\n\n"
-        f"{h(memo)}\n\n"
-        "Sau khi thanh toán, admin hoặc webhook sẽ xác nhận và bot tự giao hàng/cộng ví."
+        f"{h(memo)}\n"
+        "Admin hoặc webhook xác nhận xong bot sẽ tự cộng số dư vào ví."
     )
 
 
-def usdt_bep20_instruction(intent: dict, *, address: str, tolerance: str = "0.02") -> str:
+def usdt_bep20_instruction(intent: dict, *, address: str, tolerance: str = "0.02", network: str = "BEP20") -> str:
     amount = fmt_money(int(intent['amount_minor']), intent['currency'])
+    net = (network or "BEP20").upper()
     return (
-        f"🌕 <b>Thanh toán USDT (BEP20)</b>\n\n"
-        f"Mã thanh toán: <code>{h(intent['public_code'])}</code>\n"
+        f"🌕 <b>Nạp ví USDT ({h(net)})</b>\n\n"
+        f"Mã nạp/xác nhận: <code>{h(intent['public_code'])}</code>\n"
         f"Vui lòng chuyển đúng: <b>{amount}</b>\n"
-        f"Địa chỉ BEP20:\n<code>{h(address or 'Chưa cấu hình USDT_BEP20_ADDRESS')}</code>\n"
+        f"Địa chỉ nhận USDT ({h(net)}):\n<code>{h(address or 'Chưa cấu hình USDT_BEP20_ADDRESS')}</code>\n"
         f"Hết hạn: <code>{h(intent['expires_at'])}</code>\n\n"
-        f"⚠️ Sai số cho phép: <b>{h(tolerance)} USDT</b>. Phí mạng không được trừ vào số tiền shop nhận.\n"
-        "Sau khi chuyển, gửi TXID/hash cho admin hoặc bấm làm mới nếu đã có webhook/đối soát."
+        f"⚠️ Số tiền shop nhận nên khớp đúng số tiền trên. Phí mạng không được trừ vào số tiền nhận.\n"
+        f"Nếu dùng đối soát thủ công, hãy gửi TXID/hash kèm mã <code>{h(intent['public_code'])}</code> cho admin."
     )
 
 
@@ -253,15 +254,24 @@ def usdt_qr_url(address: str) -> str:
     return f"https://api.qrserver.com/v1/create-qr-code/?size=420x420&data={data}"
 
 
-def wallet(balances: dict[str, int]) -> str:
-    lines = ["💰 <b>Ví của bạn</b>", ""]
-    if balances:
-        for cur, amount in balances.items():
-            lines.append(f"- {h(cur)}: <b>{fmt_money(int(amount), cur)}</b>")
-    else:
-        lines.append("- Chưa có số dư")
-    lines.append("\nBạn có thể nạp ví rồi dùng số dư ví để mua nhanh.")
-    return "\n".join(lines)
+def _fmt_vnd_wallet(amount_minor: int) -> str:
+    value = int(amount_minor or 0)
+    if value == 0:
+        return "0k"
+    if value % 1000 == 0:
+        return f"{value // 1000:,}k".replace(",", ".")
+    return fmt_money(value, "VND")
+
+
+def wallet(balances: dict[str, int], *, usdt_network: str = "BEP20") -> str:
+    vnd = int((balances or {}).get("VND", 0) or 0)
+    usdt = int((balances or {}).get("USDT", 0) or 0)
+    network = (usdt_network or "BEP20").upper()
+    return (
+        "👛 <b>Ví của bạn</b>\n\n"
+        f"VND: <b>{h(_fmt_vnd_wallet(vnd))}</b>\n"
+        f"USDT ({h(network)}): <b>{fmt_money(usdt, 'USDT')}</b>"
+    )
 
 
 def history(orders: list[dict]) -> str:

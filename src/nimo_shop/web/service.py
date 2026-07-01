@@ -8,7 +8,7 @@ import secrets
 import shutil
 import zipfile
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -152,6 +152,13 @@ CREATE TABLE IF NOT EXISTS buyer_api_idempotency (
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS admin_login_attempts (
+    attempt_key TEXT PRIMARY KEY,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 """
 
 DEFAULT_SETTING_KEYS: dict[str, tuple[str, int]] = {
@@ -179,6 +186,7 @@ DEFAULT_SETTING_KEYS: dict[str, tuple[str, int]] = {
     "BINANCE_PAY_NOTE": ("", 0),
     "USDT_BEP20_ADDRESS": ("", 0),
     "USDT_BEP20_TOLERANCE": ("0.02", 0),
+    "USDT_NETWORK": ("BEP20", 0),
     "WEB_ADMIN_USERNAME": ("admin", 0),
     "WEB_ADMIN_PASSWORD": ("", 1),
     "WEB_SESSION_SECRET": ("", 1),
@@ -239,6 +247,38 @@ class AdminWebService:
             if row and verify_password(password, row["password_hash"]):
                 return dict(row)
         return None
+
+    @staticmethod
+    def _login_now() -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def login_blocked(self, attempt_key: str) -> tuple[bool, str]:
+        now = self._login_now()
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT locked_until FROM admin_login_attempts WHERE attempt_key=?", (attempt_key,)).fetchone()
+        locked_until = str(row["locked_until"] or "") if row else ""
+        return (bool(locked_until and locked_until > now), locked_until)
+
+    def record_login_failure(self, attempt_key: str, *, max_failures: int = 5, lock_minutes: int = 15) -> None:
+        now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        now = now_dt.isoformat()
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT failed_count, locked_until FROM admin_login_attempts WHERE attempt_key=?", (attempt_key,)).fetchone()
+            failed = int(row["failed_count"] or 0) + 1 if row else 1
+            locked_until = None
+            if failed >= max_failures:
+                locked_until = (now_dt + timedelta(minutes=lock_minutes)).isoformat()
+            conn.execute(
+                """
+                INSERT INTO admin_login_attempts(attempt_key, failed_count, locked_until, updated_at) VALUES(?,?,?,?)
+                ON CONFLICT(attempt_key) DO UPDATE SET failed_count=excluded.failed_count, locked_until=excluded.locked_until, updated_at=excluded.updated_at
+                """,
+                (attempt_key, failed, locked_until, now),
+            )
+
+    def clear_login_failures(self, attempt_key: str) -> None:
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM admin_login_attempts WHERE attempt_key=?", (attempt_key,))
 
     def log(self, admin_id: int | None, action: str, target_type: str = "", target_id: str = "", metadata: dict | None = None) -> None:
         with self.db.transaction() as conn:
@@ -439,25 +479,35 @@ class AdminWebService:
             raise ValueError("File ảnh trống")
         if len(data) > self.PRODUCT_IMAGE_MAX_BYTES:
             raise ValueError("Ảnh sản phẩm quá lớn. Giới hạn 5MB")
+        # Validate the product before writing to disk; otherwise a bad product_id
+        # can leave orphan files in media/products.
+        self.get_product(product_id)
         ext = self._detect_image_ext(filename, data)
         media_dir = self.project_root / "media" / "products"
         media_dir.mkdir(parents=True, exist_ok=True)
-        # Remove previous local images for the same product so backup stays clean.
-        for old in media_dir.glob(f"product_{product_id}.*"):
-            try:
-                old.unlink()
-            except OSError:
-                pass
         path = media_dir / f"product_{product_id}{ext}"
-        path.write_bytes(data)
+        tmp_path = media_dir / f".product_{product_id}.{secrets.token_hex(6)}{ext}.tmp"
         rel = path.relative_to(self.project_root).as_posix()
-        with self.db.transaction() as conn:
-            row = conn.execute(
-                "UPDATE products SET product_image_path=?, product_image_file_id='' WHERE id=?",
-                (rel, product_id),
-            ).rowcount
-            if row == 0:
-                raise ValueError("Không tìm thấy sản phẩm")
+        try:
+            tmp_path.write_bytes(data)
+            # Remove previous local images for the same product so backup stays clean.
+            for old in media_dir.glob(f"product_{product_id}.*"):
+                if old != path:
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
+            tmp_path.replace(path)
+            with self.db.transaction() as conn:
+                row = conn.execute(
+                    "UPDATE products SET product_image_path=?, product_image_file_id='' WHERE id=?",
+                    (rel, product_id),
+                ).rowcount
+                if row == 0:
+                    raise ValueError("Không tìm thấy sản phẩm")
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
         self.log(admin_id, "product.image.save", "product", str(product_id), {"path": rel, "size": len(data)})
         return rel
 
@@ -888,33 +938,47 @@ class AdminWebService:
             )]
 
     def resolve_user_ref(self, user_ref: str, *, create_if_numeric_telegram: bool = False) -> int:
-        """Resolve admin input to an internal users.id.
+        """Resolve admin input to users.id without guessing money targets.
 
-        Admins usually paste Telegram ID from the bot, not the internal DB ID.
-        Accept internal ID, Telegram ID, @username/username. For credit actions,
-        a numeric Telegram ID can be created if the user has not started the bot
-        yet, preventing raw FOREIGN KEY failures while still keeping DB valid.
+        Safe formats:
+        - tg:123456789 or plain 123456789 => Telegram ID
+        - id:12 => internal database user id
+        - @username / username => username
+
+        Plain numeric input is intentionally treated as Telegram ID only. Falling
+        back from a missing Telegram ID to internal id can credit/debit the wrong
+        customer when those numbers collide.
         """
         ref = str(user_ref or "").strip()
         if not ref:
-            raise ValueError("Vui lòng nhập User: Telegram ID, username hoặc ID nội bộ")
-        username = ref[1:] if ref.startswith("@") else ref
+            raise ValueError("Vui lòng nhập User: tg:<telegram_id>, @username hoặc id:<id nội bộ>")
+        lower = ref.lower()
         with self.db.transaction() as conn:
+            if lower.startswith("id:"):
+                raw_id = ref.split(":", 1)[1].strip()
+                if not raw_id.isdigit():
+                    raise ValueError("ID nội bộ không hợp lệ. Ví dụ đúng: id:12")
+                row = conn.execute("SELECT id FROM users WHERE id=?", (int(raw_id),)).fetchone()
+                if row:
+                    return int(row["id"])
+                raise ValueError("Không tìm thấy user theo ID nội bộ")
+
+            if lower.startswith("tg:"):
+                ref = ref.split(":", 1)[1].strip()
+                if not ref.isdigit():
+                    raise ValueError("Telegram ID không hợp lệ. Ví dụ đúng: tg:123456789")
+
+            username = ref[1:] if ref.startswith("@") else ref
             row = conn.execute("SELECT id FROM users WHERE telegram_id=?", (ref,)).fetchone()
             if row:
                 return int(row["id"])
             row = conn.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
             if row:
                 return int(row["id"])
-            if ref.isdigit():
-                # Fall back to internal DB id only after trying Telegram ID.
-                row = conn.execute("SELECT id FROM users WHERE id=?", (int(ref),)).fetchone()
-                if row:
-                    return int(row["id"])
-                if create_if_numeric_telegram:
-                    cur = conn.execute("INSERT INTO users(telegram_id, username, full_name) VALUES(?,?,?)", (ref, None, None))
-                    return int(cur.lastrowid)
-        raise ValueError("Không tìm thấy người dùng. Hãy nhập Telegram ID đúng hoặc yêu cầu khách bấm /start trước.")
+            if ref.isdigit() and create_if_numeric_telegram:
+                cur = conn.execute("INSERT INTO users(telegram_id, username, full_name) VALUES(?,?,?)", (ref, None, None))
+                return int(cur.lastrowid)
+        raise ValueError("Không tìm thấy người dùng. Hãy nhập tg:<Telegram ID>, @username hoặc id:<ID nội bộ>.")
 
     def manual_wallet_adjust(self, *, user_ref: str, direction: str, currency: str, amount: str, reason: str, admin_id: int | None = None) -> int:
         amount_minor = to_minor(amount, currency)

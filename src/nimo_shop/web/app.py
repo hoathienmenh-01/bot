@@ -9,13 +9,15 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from datetime import timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from nimo_shop.db import Database
 from nimo_shop.money import fmt_money, from_minor
+from nimo_shop.payments.binance_pay import BinancePayClient, BinancePayConfig
 from nimo_shop.services.catalog import CatalogService
-from nimo_shop.services.orders import OrderService, OutOfStock
+from nimo_shop.services.orders import OrderService, OutOfStock, iso, utcnow
 from nimo_shop.services.users import UserService
 from nimo_shop.services.wallet import InsufficientFunds, WalletService
 from nimo_shop.web.security import create_session, csrf_token, read_session, verify_csrf
@@ -60,6 +62,68 @@ NAV = [
     ("/payments", "payments"), ("/reconcile", "reconcile"), ("/bots", "bots"), ("/notifications", "notifications"),
     ("/backup", "backup"), ("/imports", "imports"), ("/exports", "exports"), ("/coupons", "coupons"), ("/low-stock", "low_stock"),
     ("/deliveries", "deliveries"), ("/roles", "roles"), ("/status", "status"), ("/settings", "settings"), ("/guide", "guide"), ("/audit", "audit"), ("/logs", "logs"),
+]
+
+NAV_ICONS = {
+    "dashboard": "◈", "orders": "🛒", "preorders": "🧾", "products": "📦", "categories": "🗂",
+    "stock": "🧱", "users": "👥", "wallets": "💳", "finance": "📈", "payments": "💸",
+    "reconcile": "🧮", "bots": "🤖", "notifications": "📣", "backup": "🛡", "imports": "📥",
+    "exports": "📤", "coupons": "🎁", "low_stock": "⚠", "deliveries": "📨", "roles": "🔐",
+    "status": "◎", "settings": "⚙", "guide": "❖", "audit": "🧪", "logs": "🪵",
+}
+
+ROLE_LABELS = {
+    "owner": "Owner • toàn quyền",
+    "finance": "Finance • tiền & thanh toán",
+    "stock": "Stock • sản phẩm & kho",
+    "support": "Support • chăm sóc khách",
+    "viewer": "Viewer • chỉ xem",
+}
+
+PAGE_META = {
+    "dashboard": {"eyebrow": "Control center", "desc": "Theo dõi toàn bộ shop trong một màn hình: đơn hàng, kho, thanh toán, đối soát và sức khỏe hệ thống."},
+    "orders": {"eyebrow": "Sales flow", "desc": "Quản lý vòng đời đơn hàng từ chờ thanh toán đến giao hàng, hủy hoặc hoàn tiền."},
+    "preorders": {"eyebrow": "Backorder desk", "desc": "Theo dõi đơn đặt trước, tiền cọc và tiến độ xử lý khi hàng về kho."},
+    "products": {"eyebrow": "Catalog studio", "desc": "Thiết kế danh mục sản phẩm đẹp mắt, rõ ràng, dễ bán và dễ vận hành."},
+    "categories": {"eyebrow": "Catalog structure", "desc": "Gom nhóm sản phẩm theo thương hiệu, dịch vụ hoặc loại hàng để bot hiển thị gọn gàng hơn."},
+    "stock": {"eyebrow": "Inventory pipeline", "desc": "Nhập, chuẩn hóa và theo dõi hàng số theo từng định dạng giao cho khách."},
+    "users": {"eyebrow": "Customer base", "desc": "Tổng hợp hồ sơ khách, lịch sử mua và mức chi tiêu để bạn chăm sóc tốt hơn."},
+    "wallets": {"eyebrow": "Wallet desk", "desc": "Theo dõi số dư ví và xử lý cộng trừ thủ công một cách an toàn, rõ ràng."},
+    "finance": {"eyebrow": "Finance overview", "desc": "Xem tổng quan dòng tiền, nghĩa vụ ví và lợi nhuận gộp theo từng loại tiền."},
+    "payments": {"eyebrow": "Payment operations", "desc": "Theo dõi payment intent, giao dịch từ cổng thanh toán và xác nhận thủ công khi cần."},
+    "settings": {"eyebrow": "System setup", "desc": "Cấu hình bot, ngân hàng, giao hàng và Web Admin theo từng nhóm rõ ràng."},
+    "bots": {"eyebrow": "Bot workspace", "desc": "Quản lý nhiều bot Telegram trong cùng một panel: bot chính, bot hỗ trợ, bot thanh toán."},
+    "notifications": {"eyebrow": "Broadcast center", "desc": "Tạo và theo dõi các chiến dịch thông báo gửi tới khách hàng trên Telegram."},
+    "backup": {"eyebrow": "Backup vault", "desc": "Sao lưu và phục hồi dữ liệu an toàn trước các thay đổi lớn hoặc khi chuyển máy."},
+    "guide": {"eyebrow": "Operations guide", "desc": "Tài liệu vận hành nhanh để bạn hoặc nhân sự mới có thể dùng hệ thống đúng cách."},
+    "status": {"eyebrow": "System pulse", "desc": "Kiểm tra tình trạng hoạt động của bot, database, cấu hình thanh toán và backup."},
+    "imports": {"eyebrow": "Bulk import", "desc": "Nhập dữ liệu số lượng lớn để tiết kiệm thời gian thiết lập catalog."},
+    "exports": {"eyebrow": "Report export", "desc": "Tải các file CSV đối soát, báo cáo hoặc sao chép dữ liệu sang hệ thống khác."},
+    "reconcile": {"eyebrow": "Reconciliation", "desc": "Rà soát giao dịch lệch mã, lệch số tiền hoặc cần xác minh thủ công."},
+    "coupons": {"eyebrow": "Promotion lab", "desc": "Tạo coupon khuyến mãi và quản lý giới hạn sử dụng theo chiến dịch."},
+    "roles": {"eyebrow": "Admin access", "desc": "Phân quyền từng tài khoản quản trị để giảm rủi ro vận hành và sai thao tác."},
+    "deliveries": {"eyebrow": "Delivery logs", "desc": "Theo dõi lịch sử tải/gửi file giao hàng để hỗ trợ khách nhanh hơn."},
+    "low_stock": {"eyebrow": "Restock alert", "desc": "Giám sát sản phẩm sắp hết hàng để chủ động nhập thêm hoặc mở preorder."},
+    "audit": {"eyebrow": "System audit", "desc": "Phát hiện chênh lệch ví, kho, đơn hàng và dòng tiền trước khi thành lỗi thương mại."},
+    "logs": {"eyebrow": "Admin trail", "desc": "Lưu vết thao tác quản trị để kiểm tra, truy vết và phân quyền minh bạch hơn."},
+}
+
+HEADER_ACTIONS = {
+    "/": [("/products?new=1", "＋ Thêm sản phẩm", "primary"), ("/stock", "Nhập kho", "secondary"), ("/notifications", "Thông báo", "ghost")],
+    "/products": [("/products?new=1", "＋ Thêm sản phẩm", "primary"), ("/categories", "Danh mục", "secondary"), ("/stock", "Nhập kho", "ghost")],
+    "/stock": [("/imports", "Import dữ liệu", "secondary"), ("/products", "Sản phẩm", "ghost")],
+    "/orders": [("/payments", "Thanh toán", "secondary"), ("/deliveries", "Lịch sử giao", "ghost")],
+    "/settings": [("/status", "Kiểm tra hệ thống", "secondary"), ("/guide", "Hướng dẫn", "ghost")],
+    "/payments": [("/reconcile", "Đối soát", "secondary"), ("/wallets", "Ví khách", "ghost")],
+}
+
+MODULE_HUB = [
+    ("/orders", "orders", "Theo dõi đơn, trạng thái giao hàng và hậu mãi."),
+    ("/products", "products", "Quản lý catalog, ảnh sản phẩm và thông tin bán hàng."),
+    ("/stock", "stock", "Nhập hàng số, chuẩn hóa dữ liệu và kiểm soát tồn kho."),
+    ("/payments", "payments", "Kiểm tra thanh toán, payment intent và webhook."),
+    ("/wallets", "wallets", "Theo dõi số dư và các điều chỉnh ví khách."),
+    ("/settings", "settings", "Cấu hình bot, giao hàng, ngân hàng và web admin."),
 ]
 
 # Page/action permission map. Earlier versions stored admin roles but did not
@@ -168,7 +232,7 @@ SETTING_GROUPS = [
     {
         "title": "4. Binance Pay",
         "desc": "Chỉ bật khi bạn có Binance Pay merchant API key/secret và URL webhook/return hợp lệ.",
-        "keys": ["BINANCE_PAY_ENABLED", "BINANCE_PAY_API_KEY", "BINANCE_PAY_SECRET_KEY", "BINANCE_PAY_BASE_URL", "BINANCE_PAY_RETURN_URL", "BINANCE_PAY_WEBHOOK_URL"],
+        "keys": ["BINANCE_PAY_ENABLED", "BINANCE_PAY_API_KEY", "BINANCE_PAY_SECRET_KEY", "BINANCE_PAY_BASE_URL", "BINANCE_PAY_RETURN_URL", "BINANCE_PAY_WEBHOOK_URL", "BINANCE_PAY_ID", "BINANCE_PAY_NOTE", "USDT_BEP20_ADDRESS", "USDT_NETWORK", "USDT_BEP20_TOLERANCE"],
     },
     {
         "title": "5. Giao hàng cho khách",
@@ -203,6 +267,11 @@ SETTING_META: dict[str, dict[str, str]] = {
     "BINANCE_PAY_BASE_URL": {"label": "Binance API URL", "help": "Giữ mặc định nếu dùng Binance production.", "placeholder": "https://bpay.binanceapi.com"},
     "BINANCE_PAY_RETURN_URL": {"label": "Binance return URL", "help": "Link khách quay lại sau thanh toán. Có thể để trống khi test thủ công.", "placeholder": "https://domain-cua-ban/return"},
     "BINANCE_PAY_WEBHOOK_URL": {"label": "Binance webhook URL", "help": "URL HTTPS public để Binance gửi trạng thái thanh toán. Không có domain thì để trống.", "placeholder": "https://domain-cua-ban/webhook/binance"},
+    "BINANCE_PAY_ID": {"label": "Binance ID nhận tiền", "help": "Dùng cho nạp Binance thủ công. Bot sẽ hiển thị ID này sau khi khách nhập số tiền.", "placeholder": "750113881"},
+    "BINANCE_PAY_NOTE": {"label": "Ghi chú nạp Binance", "help": "Lời nhắc thêm cho khách khi chuyển qua Binance ID.", "placeholder": "Sau khi chuyển hãy gửi ID giao dịch cho admin."},
+    "USDT_BEP20_ADDRESS": {"label": "Địa chỉ ví USDT", "help": "Địa chỉ ví nhận USDT để bot tạo QR cho khách.", "placeholder": "0x..."},
+    "USDT_NETWORK": {"label": "Mạng USDT", "help": "Tên mạng hiển thị cho khách. Ví dụ BEP20 hoặc TRC20.", "placeholder": "BEP20"},
+    "USDT_BEP20_TOLERANCE": {"label": "Sai số USDT cho phép", "help": "Dùng cho đối soát thủ công/ghi chú. Phí mạng không được trừ vào số tiền shop nhận.", "placeholder": "0.02"},
     "WEB_ADMIN_USERNAME": {"label": "Tên đăng nhập web", "help": "Username dùng để đăng nhập Web Admin.", "placeholder": "admin"},
     "WEB_ADMIN_PASSWORD": {"label": "Mật khẩu web", "help": "Để trống nếu không muốn đổi. Nhập mật khẩu mới nếu muốn đổi đăng nhập web.", "placeholder": "Nhập mật khẩu mới nếu muốn đổi"},
     "WEB_SESSION_SECRET": {"label": "Khóa bảo mật phiên web", "help": "Chuỗi ngẫu nhiên dài để ký cookie đăng nhập. Có thể tạo bằng nút/lệnh random hoặc nhập chuỗi dài.", "placeholder": "chuoi-ngau-nhien-rat-dai"},
@@ -217,9 +286,38 @@ SETTING_META: dict[str, dict[str, str]] = {
 }
 
 CSS = r"""
-:root{--bg:#f4f7fb;--panel:#ffffff;--panel2:#eef4ff;--text:#0f172a;--muted:#64748b;--brand:#2563eb;--brand2:#7c3aed;--line:#e2e8f0;--danger:#dc2626;--ok:#16a34a;--warn:#d97706;--shadow:0 18px 45px rgba(15,23,42,.09);--radius:20px;--input:#fbfdff}
-[data-theme="dark"]{--bg:#07111f;--panel:#101827;--panel2:#16243a;--text:#e5e7eb;--muted:#9aa8bd;--brand:#60a5fa;--brand2:#a78bfa;--line:#26364d;--danger:#fb7185;--ok:#4ade80;--warn:#fbbf24;--shadow:0 20px 55px rgba(0,0,0,.38);--input:#0b1526}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,rgba(37,99,235,.13),transparent 35%),var(--bg);color:var(--text);font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}a{color:inherit;text-decoration:none}button,.btn{border:0;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;padding:10px 14px;border-radius:13px;cursor:pointer;font-weight:800;box-shadow:0 10px 22px rgba(37,99,235,.22);display:inline-flex;align-items:center;gap:7px}.btn.secondary,button.secondary{background:var(--panel2);color:var(--text);box-shadow:none;border:1px solid var(--line)}.btn.danger,button.danger{background:var(--danger);box-shadow:none}.btn.ghost,button.ghost{background:transparent;color:var(--text);border:1px solid var(--line);box-shadow:none}.btn.small,button.small{padding:7px 10px;border-radius:10px;font-size:13px}.layout{display:grid;grid-template-columns:280px 1fr;min-height:100vh}.sidebar{padding:22px;background:rgba(255,255,255,.78);backdrop-filter:blur(16px);border-right:1px solid var(--line);position:sticky;top:0;height:100vh;overflow:auto}[data-theme="dark"] .sidebar{background:rgba(16,24,39,.84)}.brand{font-weight:900;font-size:22px;letter-spacing:.2px;margin-bottom:6px}.brand-badge{display:inline-flex;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;border-radius:12px;padding:6px 10px;font-size:12px;margin-bottom:12px}.subtitle{color:var(--muted);font-size:13px;margin-bottom:20px}.nav-heading{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:900;margin:14px 8px 6px}.nav-group{margin-bottom:7px}.nav a{display:flex;padding:12px 14px;border-radius:14px;color:var(--muted);margin:5px 0;font-weight:700}.nav a.active,.nav a:hover{background:var(--panel2);color:var(--text)}.main{padding:26px;max-width:1500px}.topbar{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:22px}.h1{font-size:30px;font-weight:900;margin:0}.toolbar{display:flex;gap:9px;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px;margin-bottom:16px}.card h3,.card h2{margin-top:0}.metric{font-size:28px;font-weight:900}.muted{color:var(--muted)}.help{color:var(--muted);font-size:13px;margin-top:5px}.status{display:inline-flex;padding:5px 10px;border-radius:999px;background:var(--panel2);font-size:12px;font-weight:800}.status.delivered,.status.paid,.status.order_delivered,.status.wallet_credited,.status.active{color:var(--ok)}.status.cancelled,.status.refunded,.status.rejected,.status.unmatched,.status.inactive{color:var(--danger)}.status.awaiting_payment,.status.pending,.status.reserved{color:var(--warn)}.table-wrap{overflow:auto}.premium-table{min-width:900px}table{width:100%;border-collapse:collapse}th,td{padding:13px 11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.04em}tr:hover td{background:rgba(37,99,235,.035)}label{font-weight:800;display:block}input,select,textarea{width:100%;border:1px solid var(--line);background:var(--input);color:var(--text);padding:11px 13px;border-radius:13px;font:inherit;margin-top:6px}textarea{min-height:110px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.form-grid .full{grid-column:1/-1}.alert{padding:13px 15px;border-radius:15px;margin-bottom:14px;background:var(--panel2);border:1px solid var(--line)}.alert.ok{border-color:rgba(22,163,74,.45)}.alert.err{border-color:rgba(220,38,38,.45);color:var(--danger)}.login{min-height:100vh;display:grid;place-items:center;padding:24px}.login-card{max-width:440px;width:100%}.pill{display:inline-flex;gap:8px;align-items:center;padding:7px 10px;border-radius:999px;background:var(--panel2);color:var(--muted);font-weight:800;font-size:12px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.product-title{font-weight:900}.action-row{display:flex;gap:7px;flex-wrap:wrap}.danger-zone{border:1px dashed rgba(220,38,38,.55);background:rgba(220,38,38,.04)}details.setup-section{border:1px solid var(--line);border-radius:18px;background:var(--panel);margin-bottom:14px;overflow:hidden}details.setup-section[open]{box-shadow:var(--shadow)}details.setup-section summary{cursor:pointer;padding:16px 18px;font-weight:900;list-style:none;display:flex;justify-content:space-between;gap:12px}details.setup-section summary::-webkit-details-marker{display:none}.setup-content{border-top:1px solid var(--line);padding:18px}.setting-field{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px}.setting-field.secret input::placeholder{color:var(--muted)}.hint-box,.info-box{border-left:4px solid var(--brand);background:var(--panel2);padding:13px 15px;border-radius:14px;margin-bottom:16px}.info-box{font-size:14px}.hide-mobile{display:inline}@media(max-width:980px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.main{padding:16px}.grid,.grid2,.form-grid{grid-template-columns:1fr}.hide-mobile{display:none}.topbar{display:block}.premium-table{min-width:760px}}
+:root{
+  --bg:#071321;--bg2:#0d1930;--panel:rgba(14,24,42,.90);--panel2:#13233f;--panel3:#1b3258;
+  --text:#eef4ff;--muted:#9eb0cf;--line:rgba(158,176,207,.18);--line-strong:rgba(158,176,207,.28);
+  --brand:#6ea8ff;--brand2:#a78bfa;--ok:#4ade80;--danger:#fb7185;--warn:#fbbf24;
+  --input:#0a1528;--shadow:0 24px 70px rgba(2,8,23,.42);--shadow-soft:0 18px 45px rgba(8,15,33,.28);
+  --radius:22px;
+}
+html[data-theme="light"]{
+  --bg:#eef4fb;--bg2:#f8fbff;--panel:rgba(255,255,255,.90);--panel2:#edf4ff;--panel3:#f5f8ff;
+  --text:#0f172a;--muted:#64748b;--line:rgba(15,23,42,.08);--line-strong:rgba(15,23,42,.14);
+  --brand:#2563eb;--brand2:#7c3aed;--ok:#16a34a;--danger:#dc2626;--warn:#d97706;
+  --input:#fbfdff;--shadow:0 22px 55px rgba(15,23,42,.10);--shadow-soft:0 14px 35px rgba(15,23,42,.08);
+}
+*{box-sizing:border-box}html,body{min-height:100%}body{margin:0;background:radial-gradient(circle at top left,rgba(110,168,255,.18),transparent 26%),radial-gradient(circle at top right,rgba(167,139,250,.14),transparent 24%),linear-gradient(180deg,var(--bg2),var(--bg));color:var(--text);font:15px/1.6 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+a{color:inherit;text-decoration:none}
+button,.btn{border:0;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;padding:11px 15px;border-radius:14px;cursor:pointer;font-weight:800;display:inline-flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 14px 28px rgba(37,99,235,.22)}
+.btn.secondary,button.secondary{background:var(--panel2);color:var(--text);box-shadow:none;border:1px solid var(--line)}.btn.ghost,button.ghost{background:transparent;color:var(--text);border:1px solid var(--line);box-shadow:none}.btn.danger,button.danger{background:linear-gradient(135deg,#ef4444,#f43f5e);box-shadow:none}.btn.small,button.small{padding:8px 11px;border-radius:12px;font-size:13px}
+.layout{display:grid;grid-template-columns:300px 1fr;min-height:100vh}.sidebar{padding:22px 18px 22px 22px;background:rgba(8,15,29,.55);backdrop-filter:blur(20px);border-right:1px solid var(--line);position:sticky;top:0;height:100vh;overflow:auto}.main{padding:26px 28px 34px;max-width:1600px}
+.brand-shell{padding:8px 6px 16px}.brand-badge{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;border-radius:999px;padding:7px 12px;font-size:12px;font-weight:900;letter-spacing:.03em;box-shadow:var(--shadow-soft)}.brand{font-weight:900;font-size:26px;letter-spacing:.2px;margin:12px 0 4px}.subtitle{color:var(--muted);font-size:13px;margin-bottom:16px}
+.workspace-card{padding:16px;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.02));border:1px solid var(--line);box-shadow:var(--shadow-soft);margin-bottom:16px}.workspace-label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800}.workspace-role{font-weight:900;margin:6px 0 8px}.workspace-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px}.workspace-metric{padding:10px 12px;border-radius:14px;background:var(--panel2);border:1px solid var(--line)}.workspace-metric b{display:block;font-size:16px}
+.nav-heading{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:900;margin:18px 10px 8px}.nav-group{margin-bottom:8px}.nav a{display:flex;align-items:center;gap:10px;padding:11px 13px;border-radius:15px;color:var(--muted);margin:5px 0;font-weight:800;border:1px solid transparent}.nav a.active,.nav a:hover{background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.03));color:var(--text);border-color:var(--line)}.nav-icon{width:34px;height:34px;border-radius:12px;display:grid;place-items:center;background:var(--panel2);font-size:16px;flex:0 0 34px}.nav-label{flex:1}.sidebar-footer{margin-top:18px;padding-top:18px;border-top:1px solid var(--line)}.sidebar-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.sidebar-actions .btn:last-child{grid-column:1/-1}
+.page-hero{display:flex;justify-content:space-between;align-items:flex-end;gap:18px;padding:26px 28px;border-radius:28px;background:linear-gradient(135deg,rgba(110,168,255,.16),rgba(167,139,250,.12) 45%,rgba(49,192,255,.08));border:1px solid var(--line);box-shadow:var(--shadow);margin-bottom:18px;position:relative;overflow:hidden}.eyebrow{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid var(--line);font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.page-title{font-size:34px;line-height:1.12;font-weight:900;margin:12px 0 8px}.page-lead{max-width:760px;color:var(--muted);margin:0}.hero-meta,.hero-actions,.toolbar,.action-row{display:flex;gap:10px;flex-wrap:wrap}.hero-meta{margin-top:16px}.main-badge,.pill{display:inline-flex;align-items:center;gap:8px;padding:8px 11px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-weight:800;font-size:12px}
+.content-stack{display:flex;flex-direction:column;gap:16px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.card{background:var(--panel);backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-soft);padding:20px}.section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:16px}.section-head h2,.section-head h3,.card h2,.card h3{margin:0}.card-subtitle,.muted,.help{color:var(--muted)}.metric-card{padding:18px;border-radius:22px;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.02));border:1px solid var(--line);box-shadow:var(--shadow-soft)}.metric-top{display:flex;justify-content:space-between;align-items:center;gap:10px}.metric-label{color:var(--muted);font-weight:700}.metric{font-size:32px;font-weight:900;line-height:1.1;margin:10px 0 4px}.metric-note{font-size:13px;color:var(--muted)}
+.module-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.module-card{display:flex;gap:14px;padding:18px;border-radius:20px;background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.02));border:1px solid var(--line);box-shadow:var(--shadow-soft)}.module-icon{width:48px;height:48px;border-radius:16px;background:linear-gradient(135deg,var(--panel2),var(--panel3));display:grid;place-items:center;font-size:20px;flex:0 0 48px}.module-title{font-weight:900;margin-bottom:4px}.module-note{font-size:13px;color:var(--muted)}.module-arrow{margin-left:auto;color:var(--muted);font-weight:900}
+.status{display:inline-flex;padding:6px 10px;border-radius:999px;background:var(--panel2);font-size:12px;font-weight:900;border:1px solid var(--line)}.status.delivered,.status.paid,.status.order_delivered,.status.wallet_credited,.status.active{color:var(--ok)}.status.cancelled,.status.refunded,.status.rejected,.status.unmatched,.status.inactive{color:var(--danger)}.status.awaiting_payment,.status.pending,.status.reserved,.status.awaiting_deposit{color:var(--warn)}
+.stat-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.stat-chip{padding:14px 16px;border-radius:18px;background:var(--panel2);border:1px solid var(--line)}.stat-chip b{font-size:22px;display:block;line-height:1.15;margin-bottom:2px}
+.table-wrap{overflow:auto;border-radius:18px;border:1px solid var(--line)}.premium-table{min-width:900px}table{width:100%;border-collapse:collapse}th,td{padding:13px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.05em;background:rgba(255,255,255,.02)}tr:hover td{background:rgba(110,168,255,.045)}
+label{font-weight:800;display:block}input,select,textarea{width:100%;border:1px solid var(--line);background:var(--input);color:var(--text);padding:11px 13px;border-radius:14px;font:inherit;margin-top:7px;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}textarea{min-height:110px;resize:vertical}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.form-grid .full{grid-column:1/-1}
+.alert{padding:14px 16px;border-radius:16px;background:var(--panel2);border:1px solid var(--line)}.alert.ok{border-color:rgba(34,197,94,.35)}.alert.err{border-color:rgba(239,68,68,.35);color:var(--danger)}
+.login{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at top left,rgba(110,168,255,.18),transparent 26%),radial-gradient(circle at bottom right,rgba(167,139,250,.18),transparent 22%),linear-gradient(180deg,var(--bg2),var(--bg))}.login-card{max-width:460px;width:100%;padding:28px 24px}.hint-box,.info-box{border-left:4px solid var(--brand);background:var(--panel2);padding:14px 16px;border-radius:16px;margin-bottom:16px}.checkbox-row{display:flex;align-items:center;gap:10px;font-weight:800}.checkbox-row input{width:auto;margin:0}
+code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}pre{white-space:pre-wrap;word-break:break-word;background:rgba(255,255,255,.04);padding:12px;border-radius:14px;border:1px solid var(--line)}
+@media(max-width:1180px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.module-grid,.grid,.grid2,.grid3,.stat-strip,.form-grid,.workspace-meta{grid-template-columns:1fr}.main{padding:18px}.page-hero{padding:20px;display:block}.hero-actions{margin-top:16px}.sidebar-actions{grid-template-columns:1fr 1fr}}
 """
 
 
@@ -384,18 +482,71 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         return verify_csrf(self.session_secret, self._cookie_value("nimo_session"), form.get("csrf"))
 
     def _form_csrf(self) -> str:
-        return f'<input type="hidden" name="csrf" value="{esc(self._csrf())}">'
+        return f'<input type="hidden" name="csrf" value="{esc(self._csrf())}">' 
+
+    def _nav_icon(self, key: str) -> str:
+        return NAV_ICONS.get(key, "•")
+
+    def _page_copy(self, title_key: str, active: str | None) -> tuple[str, str]:
+        section = title_key if title_key in PAGE_META else section_for_path(active or "/")
+        meta = PAGE_META.get(section, {})
+        return str(meta.get("eyebrow") or "NIMO Workspace"), str(meta.get("desc") or tr(self._theme_lang()[0], "search_note"))
+
+    def _header_actions(self, active: str | None) -> str:
+        items = HEADER_ACTIONS.get(active or "", HEADER_ACTIONS.get("/", []))
+        html_parts: list[str] = []
+        for href, label, kind in items:
+            css = "btn"
+            if kind == "secondary":
+                css += " secondary"
+            elif kind == "ghost":
+                css += " ghost"
+            html_parts.append(f'<a class="{css}" href="{href}">{esc(label)}</a>')
+        return "".join(html_parts)
+
+    def _metric_card(self, label: str, value: Any, note: str = "", icon: str = "✦") -> str:
+        return (
+            '<div class="metric-card">'
+            f'<div class="metric-top"><div class="metric-label">{esc(label)}</div><div class="pill">{esc(icon)}</div></div>'
+            f'<div class="metric">{esc(value)}</div>'
+            f'<div class="metric-note">{esc(note)}</div>'
+            '</div>'
+        )
+
+    def _stat_strip(self, items: list[tuple[str, Any, str]]) -> str:
+        return '<div class="stat-strip">' + ''.join(
+            f'<div class="stat-chip"><b>{esc(value)}</b><div>{esc(label)}</div><div class="help">{esc(note)}</div></div>'
+            for label, value, note in items
+        ) + '</div>'
+
+    def _module_hub(self) -> str:
+        session = self._session()
+        role = session.role if session else 'viewer'
+        cards: list[str] = []
+        for path, key, note in MODULE_HUB:
+            if role_can_read(role, path):
+                cards.append(
+                    f'<a class="module-card" href="{path}"><div class="module-icon">{esc(self._nav_icon(key))}</div><div>'
+                    f'<div class="module-title">{esc(tr(self._theme_lang()[0], key))}</div>'
+                    f'<div class="module-note">{esc(note)}</div></div><div class="module-arrow">→</div></a>'
+                )
+        return '<div class="module-grid">' + ''.join(cards) + '</div>'
 
     def _page(self, title_key: str, body: str, *, active: str | None = None, alert: str = "", error: str = "") -> str:
         lang, theme = self._theme_lang()
         session = self._session()
         role = session.role if session else "viewer"
+        eyebrow, page_desc = self._page_copy(title_key, active)
         nav_parts = []
         for group_title, items in NAV_GROUPS:
             links = []
             for path, key in items:
                 if role_can_read(role, path):
-                    links.append(f'<a class="{("active" if active == path else "")}" href="{path}">{tr(lang, key)}</a>')
+                    links.append(
+                        f'<a class="{("active" if active == path else "")}" href="{path}">' 
+                        f'<span class="nav-icon">{esc(self._nav_icon(key))}</span>'
+                        f'<span class="nav-label">{tr(lang, key)}</span></a>'
+                    )
             if links:
                 nav_parts.append(f'<div class="nav-group"><div class="nav-heading">{esc(group_title)}</div>' + "".join(links) + '</div>')
         nav = "".join(nav_parts)
@@ -409,12 +560,14 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         if error:
             msg += f'<div class="alert err">{esc(error)}</div>'
         user = esc(session.username if session else "")
-        return f"""<!doctype html><html lang="{esc(lang)}" data-theme="{esc(theme)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(tr(lang,title_key))} - NIMO</title><style>{CSS}</style></head><body><div class="layout"><aside class="sidebar"><div class="brand-badge">Premium Admin</div><div class="brand">NIMO Shop</div><div class="subtitle">{tr(lang,'admin_panel')} · {user}</div><nav class="nav">{nav}</nav><div style="margin-top:18px" class="toolbar"><a class="btn secondary small" href="?{toolbar_qs_light}">{tr(lang,'light')}</a><a class="btn secondary small" href="?{toolbar_qs_dark}">{tr(lang,'dark')}</a><a class="btn secondary small" href="?{toolbar_qs_lang}">{switch_lang.upper()}</a><a class="btn danger small" href="/logout">{tr(lang,'logout')}</a></div></aside><main class="main"><div class="topbar"><div><h1 class="h1">{esc(tr(lang,title_key))}</h1><div class="muted">{esc(tr(lang,'search_note'))}</div></div></div>{msg}{body}</main></div></body></html>"""
+        role_label = esc(ROLE_LABELS.get(role, role))
+        header_actions = self._header_actions(active)
+        return f"""<!doctype html><html lang="{esc(lang)}" data-theme="{esc(theme)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(tr(lang,title_key))} - NIMO</title><style>{CSS}</style></head><body><div class="layout"><aside class="sidebar"><div class="brand-shell"><div class="brand-badge">Luxury Admin</div><div class="brand">NIMO Shop</div><div class="subtitle">{tr(lang,'admin_panel')} · {user}</div></div><div class="workspace-card"><div class="workspace-label">Workspace</div><div class="workspace-role">{role_label}</div><div class="workspace-meta"><div class="workspace-metric"><span class="muted">Theme</span><b>{esc(theme.title())}</b></div><div class="workspace-metric"><span class="muted">Lang</span><b>{esc(lang.upper())}</b></div></div></div><nav class="nav">{nav}</nav><div class="sidebar-footer"><div class="sidebar-actions"><a class="btn secondary small" href="?{toolbar_qs_light}">☀ {tr(lang,'light')}</a><a class="btn secondary small" href="?{toolbar_qs_dark}">🌙 {tr(lang,'dark')}</a><a class="btn ghost small" href="?{toolbar_qs_lang}">⇄ {switch_lang.upper()}</a><a class="btn danger small" href="/logout">{tr(lang,'logout')}</a></div></div></aside><main class="main"><section class="page-hero"><div><div class="eyebrow">{esc(eyebrow)}</div><h1 class="page-title">{esc(tr(lang,title_key))}</h1><p class="page-lead">{esc(page_desc)}</p><div class="hero-meta"><span class="main-badge">{esc(user)}</span><span class="main-badge">{role_label}</span><span class="main-badge">NIMO workspace</span></div></div><div class="hero-actions">{header_actions}</div></section>{msg}<div class="content-stack">{body}</div></main></div></body></html>"""
 
     def _login_page(self, error: str = "") -> str:
         lang, theme = self._theme_lang()
         err = f'<div class="alert err">{esc(error)}</div>' if error else ""
-        return f"""<!doctype html><html lang="{esc(lang)}" data-theme="{esc(theme)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Đăng nhập - NIMO</title><style>{CSS}</style></head><body><div class="login"><div class="card login-card"><div class="brand-badge">Premium Admin</div><div class="brand">NIMO Shop Admin</div><p class="muted">Đăng nhập để quản lý sản phẩm, kho hàng, đơn, ví và cấu hình thanh toán.</p>{err}<form method="post" action="/login"><label>Tên đăng nhập<input name="username" autocomplete="username" placeholder="admin"></label><br><label>Mật khẩu<input type="password" name="password" autocomplete="current-password" placeholder="mật khẩu đã cấu hình"></label><br><br><button>{esc(tr(lang,'login'))}</button></form></div></div></body></html>"""
+        return f"""<!doctype html><html lang="{esc(lang)}" data-theme="{esc(theme)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Đăng nhập - NIMO</title><style>{CSS}</style></head><body><div class="login"><div class="card login-card"><div class="brand-badge">Luxury Admin</div><div class="brand">NIMO Shop Admin</div><p class="muted">Đăng nhập để quản lý sản phẩm, kho hàng, đơn, ví, đối soát và cấu hình thanh toán với giao diện vận hành cao cấp hơn.</p>{err}<form method="post" action="/login" class="form-grid"><label class="full">Tên đăng nhập<input name="username" autocomplete="username" placeholder="admin"></label><label class="full">Mật khẩu<input type="password" name="password" autocomplete="current-password" placeholder="mật khẩu đã cấu hình"></label><button>{esc(tr(lang,'login'))}</button></form></div></div></body></html>"""
 
 
     def _send_json(self, payload: dict[str, Any] | list[Any], status: int = 200) -> None:
@@ -450,6 +603,62 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
         signature = self.headers.get("X-NIMO-Signature", "").strip()
         expected = hmac.new(secret.encode("utf-8"), raw_body.encode("utf-8"), hashlib.sha256).hexdigest()
         return hmac.compare_digest(signature, expected) or hmac.compare_digest(signature, f"sha256={expected}")
+
+
+    def _setting_value(self, key: str, fallback: str = "") -> str:
+        try:
+            setting = self.service.get_settings().get(key)
+            if isinstance(setting, dict):
+                value = setting.get("value")
+            else:
+                value = setting
+            return str(value or os.getenv(key) or fallback or "").strip()
+        except Exception:
+            return str(os.getenv(key) or fallback or "").strip()
+
+    def _verify_binance_webhook_request(self, raw_body: str) -> bool:
+        secret = self._setting_value("BINANCE_PAY_SECRET_KEY")
+        if not secret:
+            return False
+        timestamp = self.headers.get("BinancePay-Timestamp", "").strip()
+        nonce = self.headers.get("BinancePay-Nonce", "").strip()
+        signature = self.headers.get("BinancePay-Signature", "").strip()
+        if not (timestamp and nonce and signature):
+            return False
+        client = BinancePayClient(BinancePayConfig(api_key=self._setting_value("BINANCE_PAY_API_KEY", "unused"), secret_key=secret))
+        return client.verify_webhook_signature(timestamp=timestamp, nonce=nonce, body=raw_body, signature=signature)
+
+    @staticmethod
+    def _parse_binance_webhook_payload(payload: dict[str, Any]) -> dict[str, str]:
+        data = payload.get("data") or {}
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        goods = data.get("goods") if isinstance(data.get("goods"), dict) else {}
+        status = str(payload.get("bizStatus") or data.get("bizStatus") or payload.get("status") or data.get("status") or "").upper()
+        payment_code = str(
+            data.get("merchantTradeNo")
+            or payload.get("merchantTradeNo")
+            or data.get("referenceGoodsId")
+            or goods.get("referenceGoodsId")
+            or data.get("description")
+            or ""
+        ).strip()
+        tx_id = str(
+            data.get("transactionId")
+            or data.get("transactId")
+            or data.get("prepayId")
+            or payload.get("bizId")
+            or data.get("bizId")
+            or payment_code
+        ).strip()
+        amount = str(data.get("orderAmount") or data.get("amount") or payload.get("orderAmount") or payload.get("amount") or "0").strip()
+        currency = str(data.get("currency") or payload.get("currency") or "USDT").strip().upper()
+        return {"status": status, "payment_code": payment_code, "tx_id": tx_id, "amount": amount, "currency": currency}
 
     def _api_key_from_request(self) -> str:
         auth = self.headers.get("Authorization", "").strip()
@@ -511,50 +720,56 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             quantity = int(payload.get("quantity") or 1)
             if product_id <= 0 or quantity <= 0:
                 raise ValueError("product_id and quantity must be positive")
-            product = self.service.get_product(product_id)
-            if not int(product.get("is_active") or 0):
-                raise ValueError("product is inactive")
-            available = int(product.get("available_stock") or 0)
-            if quantity > available:
-                self._send_json({"ok": False, "error": "out_of_stock", "available_stock": available}, status=409)
-                return
-            total = int(product["price_minor"]) * quantity
-            balances = WalletService(self.service.db).get_balances(int(user["id"]))
-            balance = int(balances.get(product["currency"], 0))
-            if balance < total:
-                self._send_json({"ok": False, "error": "insufficient_balance", "currency": product["currency"], "required_minor": total, "balance_minor": balance}, status=402)
-                return
             idem_key = str(payload.get("idempotency_key") or self.headers.get("Idempotency-Key") or "").strip()
-            if idem_key:
-                with self.service.db.connect() as conn:
-                    row = conn.execute("SELECT response_json FROM buyer_api_idempotency WHERE user_id=? AND idempotency_key=?", (int(user["id"]), idem_key)).fetchone()
-                    if row and row["response_json"]:
-                        self._send_json(json.loads(row["response_json"]))
+            user_id = int(user["id"])
+            expires_at = iso(utcnow() + timedelta(minutes=self.service.order_expires_minutes()))
+            with self.service.db.transaction() as conn:
+                if idem_key:
+                    row = conn.execute(
+                        "SELECT response_json FROM buyer_api_idempotency WHERE user_id=? AND idempotency_key=?",
+                        (user_id, idem_key),
+                    ).fetchone()
+                    if row:
+                        if row["response_json"]:
+                            self._send_json(json.loads(row["response_json"]))
+                            return
+                        self._send_json({"ok": False, "error": "request_in_progress"}, status=409)
                         return
-            order_service = OrderService(self.service.db, order_expires_minutes=self.service.order_expires_minutes())
-            order = order_service.create_order(user_id=int(user["id"]), product_id=product_id, quantity=quantity)
-            result = order_service.pay_with_wallet(int(order["id"]), expected_user_id=int(user["id"]))
-            delivery = [str(r["delivered_content"]) for r in result.get("delivery") or []]
-            response_payload = {
-                "ok": True,
-                "order": {
-                    "id": int(result["order"]["id"]),
-                    "public_code": result["order"]["public_code"],
-                    "status": result["order"]["status"],
-                    "product_id": product_id,
-                    "product_name": result["order"]["product_name"],
-                    "quantity": quantity,
-                    "currency": result["order"]["currency"],
-                    "total_amount_minor": int(result["order"]["total_amount_minor"]),
-                    "total_display": fmt_money(int(result["order"]["total_amount_minor"]), result["order"]["currency"]),
-                },
-                "delivery": delivery,
-            }
-            if idem_key:
-                with self.service.db.transaction() as conn:
+                    # Reserve the key before touching stock/wallet. With SQLite's
+                    # BEGIN IMMEDIATE, concurrent identical requests serialize and
+                    # the second request receives the completed response.
                     conn.execute(
-                        "INSERT OR REPLACE INTO buyer_api_idempotency(user_id,idempotency_key,response_json) VALUES(?,?,?)",
-                        (int(user["id"]), idem_key, json.dumps(response_payload, ensure_ascii=False)),
+                        "INSERT INTO buyer_api_idempotency(user_id,idempotency_key,response_json) VALUES(?,?, '')",
+                        (user_id, idem_key),
+                    )
+                order = OrderService._create_order_in_conn(
+                    conn,
+                    user_id=user_id,
+                    product_id=product_id,
+                    quantity=quantity,
+                    expires_at=expires_at,
+                )
+                result = OrderService._pay_with_wallet_in_conn(conn, int(order["id"]), expected_user_id=user_id)
+                delivery = [str(r["delivered_content"]) for r in result.get("delivery") or []]
+                response_payload = {
+                    "ok": True,
+                    "order": {
+                        "id": int(result["order"]["id"]),
+                        "public_code": result["order"]["public_code"],
+                        "status": result["order"]["status"],
+                        "product_id": product_id,
+                        "product_name": result["order"]["product_name"],
+                        "quantity": quantity,
+                        "currency": result["order"]["currency"],
+                        "total_amount_minor": int(result["order"]["total_amount_minor"]),
+                        "total_display": fmt_money(int(result["order"]["total_amount_minor"]), result["order"]["currency"]),
+                    },
+                    "delivery": delivery,
+                }
+                if idem_key:
+                    conn.execute(
+                        "UPDATE buyer_api_idempotency SET response_json=? WHERE user_id=? AND idempotency_key=?",
+                        (json.dumps(response_payload, ensure_ascii=False), user_id, idem_key),
                     )
             self._send_json(response_payload)
         except InsufficientFunds:
@@ -642,33 +857,61 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), status=413, content_type="application/json; charset=utf-8")
                 return
-            if not self._verify_webhook_request(raw):
+            is_binance_native = parsed.path.endswith("binance") and bool(self.headers.get("BinancePay-Signature"))
+            if is_binance_native:
+                if not self._verify_binance_webhook_request(raw):
+                    self._send(json.dumps({"ok": False, "error": "invalid_binance_signature"}, ensure_ascii=False), status=401, content_type="application/json; charset=utf-8")
+                    return
+            elif not self._verify_webhook_request(raw):
                 self._send(json.dumps({"ok": False, "error": "invalid_webhook_signature"}, ensure_ascii=False), status=401, content_type="application/json; charset=utf-8")
                 return
             try:
                 payload = json.loads(raw) if raw.strip().startswith("{") else {k: v[-1] for k, v in parse_qs(raw, keep_blank_values=True).items()}
-                # Internal payment intents use provider ids "bank" and
-                # "binance_pay". The public URL names are /webhook/sepay and
-                # /webhook/binance, so map them here before reconciliation.
-                provider = "bank" if parsed.path.endswith("sepay") else "binance_pay"
-                result = self.service.ingest_webhook_event(
-                    provider=provider,
-                    tx_id=str(payload.get("tx_id") or payload.get("id") or payload.get("transaction_id") or payload.get("provider_tx_id") or ""),
-                    amount=str(payload.get("amount") or payload.get("transferAmount") or payload.get("amountIn") or "0"),
-                    currency=str(payload.get("currency") or "VND"),
-                    description=str(payload.get("description") or payload.get("content") or payload.get("note") or payload.get("remark") or ""),
-                    raw=payload,
-                )
+                if is_binance_native:
+                    parsed_binance = self._parse_binance_webhook_payload(payload)
+                    if parsed_binance["status"] and parsed_binance["status"] not in {"PAY_SUCCESS", "SUCCESS", "PAID"}:
+                        self._send(json.dumps({"ok": True, "status": "ignored", "provider_status": parsed_binance["status"]}, ensure_ascii=False), content_type="application/json; charset=utf-8")
+                        return
+                    result = self.service.ingest_webhook_event(
+                        provider="binance_pay",
+                        tx_id=parsed_binance["tx_id"],
+                        amount=parsed_binance["amount"],
+                        currency=parsed_binance["currency"],
+                        description=parsed_binance["payment_code"],
+                        raw={"payment_code": parsed_binance["payment_code"], **payload},
+                    )
+                else:
+                    # Internal payment intents use provider ids "bank" and
+                    # "binance_pay". The public URL names are /webhook/sepay and
+                    # /webhook/binance, so map them here before reconciliation.
+                    provider = "bank" if parsed.path.endswith("sepay") else "binance_pay"
+                    result = self.service.ingest_webhook_event(
+                        provider=provider,
+                        tx_id=str(payload.get("tx_id") or payload.get("id") or payload.get("transaction_id") or payload.get("provider_tx_id") or ""),
+                        amount=str(payload.get("amount") or payload.get("transferAmount") or payload.get("amountIn") or "0"),
+                        currency=str(payload.get("currency") or "VND"),
+                        description=str(payload.get("description") or payload.get("content") or payload.get("note") or payload.get("remark") or ""),
+                        raw=payload,
+                    )
                 self._send(json.dumps(result, ensure_ascii=False), content_type="application/json; charset=utf-8")
             except Exception as exc:
                 self._send(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), status=400, content_type="application/json; charset=utf-8")
             return
         if parsed.path == "/login":
             form = self._read_form()
-            admin = self.service.authenticate(form.get("username", ""), form.get("password", ""))
+            username = form.get("username", "")
+            client_ip = (self.headers.get("X-Forwarded-For") or self.client_address[0] or "").split(",", 1)[0].strip()
+            attempt_key = f"{client_ip}:{username.strip().lower()}"
+            blocked, locked_until = self.service.login_blocked(attempt_key)
+            if blocked:
+                self._send(self._login_page(f"Đăng nhập sai quá nhiều lần. Hãy thử lại sau {locked_until}."), status=429)
+                return
+            admin = self.service.authenticate(username, form.get("password", ""))
             if not admin:
+                self.service.record_login_failure(attempt_key)
                 self._send(self._login_page("Sai tài khoản hoặc mật khẩu"), status=401)
                 return
+            self.service.clear_login_failures(attempt_key)
             token = create_session(self.session_secret, admin_id=int(admin["id"]), username=admin["username"], role=admin["role"])
             secure = "; Secure" if str(os.getenv("WEB_COOKIE_SECURE", "")).lower() in {"1", "true", "yes", "on"} else ""
             self._redirect("/", [f"nimo_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200{secure}"])
@@ -854,15 +1097,40 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
     def _dashboard(self) -> str:
         data = self.service.dashboard()
         c = data["counts"]
-        metric_names = {
-            "users": "Người dùng", "products": "Sản phẩm đang bán", "available_stock": "Hàng còn",
-            "pending_orders": "Đơn chờ", "delivered_orders": "Đã giao", "unmatched_payments": "GD cần đối soát",
-        }
-        metrics = "".join(f'<div class="card"><div class="muted">{esc(metric_names.get(k,k))}</div><div class="metric">{esc(v)}</div></div>' for k, v in c.items())
+        metrics = ''.join([
+            self._metric_card("Người dùng", c.get("users", 0), "Tổng khách đã có hồ sơ trong hệ thống.", "👥"),
+            self._metric_card("Sản phẩm đang bán", c.get("products", 0), "Catalog đang hoạt động trên bot.", "📦"),
+            self._metric_card("Hàng còn", c.get("available_stock", 0), "Tổng số dòng hàng đang khả dụng.", "🧱"),
+            self._metric_card("Đơn chờ", c.get("pending_orders", 0), "Các đơn cần thanh toán hoặc xử lý tiếp.", "🛒"),
+            self._metric_card("Đã giao", c.get("delivered_orders", 0), "Đơn đã hoàn tất giao hàng.", "📨"),
+            self._metric_card("Cần đối soát", c.get("unmatched_payments", 0), "Giao dịch lệch mã cần xem lại.", "🧮"),
+        ])
         audit = data["audit"]
-        audit_html = '<span class="status delivered">Hệ thống sạch</span><p class="muted">Không phát hiện lệch ví, kho, đơn hoặc dòng tiền.</p>' if not audit else "".join(f'<div class="alert err">{esc(i.code)}: {esc(i.message)}</div>' for i in audit)
+        audit_html = '<div class="alert ok">Không phát hiện lệch ví, kho, đơn hoặc dòng tiền.</div>' if not audit else ''.join(f'<div class="alert err">{esc(i.code)}: {esc(i.message)}</div>' for i in audit)
         orders = self._orders_table(data["recent_orders"], compact=True)
-        return f'<div class="grid">{metrics}</div><div class="grid2"><div class="card"><h3>Kiểm tra nhanh</h3>{audit_html}</div><div class="card"><h3>Đơn gần đây</h3>{orders}</div></div>'
+        low_stock = self.service.low_stock_items(5)
+        low_html = '<div class="alert ok">Không có sản phẩm sắp hết hàng trong ngưỡng cảnh báo.</div>' if not low_stock else ''.join(
+            f'<a class="module-card" href="/stock?product_id={int(item["product_id"])}"><div class="module-icon">⚠</div><div><div class="module-title">{esc(item["name"])} </div><div class="module-note">Còn {int(item["available"])} dòng hàng. Bấm để nhập thêm.</div></div><div class="module-arrow">→</div></a>'
+            for item in low_stock[:6]
+        )
+        top_stats = self._stat_strip([
+            ("Tổng user", c.get("users", 0), "Cơ sở khách hàng hiện tại"),
+            ("Đơn chờ", c.get("pending_orders", 0), "Theo dõi xử lý ngay"),
+            ("Đơn đã giao", c.get("delivered_orders", 0), "Đơn hoàn tất"),
+            ("Cần đối soát", c.get("unmatched_payments", 0), "Ưu tiên kiểm tra"),
+        ])
+        return (
+            top_stats +
+            '<div class="grid3">' + metrics + '</div>' +
+            '<div class="grid2">'
+            '<div class="card"><div class="section-head"><div><h2>Trung tâm điều hành</h2><div class="card-subtitle">Các chức năng chính đã được gom thành hub để vào nhanh hơn và đỡ rối hơn.</div></div></div>' + self._module_hub() + '</div>'
+            '<div class="card"><div class="section-head"><div><h2>Kiểm tra nhanh</h2><div class="card-subtitle">Xem sức khỏe hệ thống trước khi xử lý đơn.</div></div><a class="btn secondary small" href="/audit">Mở Audit</a></div>' + audit_html + '</div>'
+            '</div>'
+            '<div class="grid2">'
+            f'<div class="card"><div class="section-head"><div><h2>Đơn gần đây</h2><div class="card-subtitle">Những đơn mới nhất để bạn theo dõi thao tác giao hàng và thanh toán.</div></div><a class="btn ghost small" href="/orders">Xem tất cả</a></div>{orders}</div>'
+            f'<div class="card"><div class="section-head"><div><h2>Cảnh báo kho thấp</h2><div class="card-subtitle">Biết ngay sản phẩm nào cần nhập thêm hoặc mở preorder.</div></div><a class="btn ghost small" href="/low-stock">Mở trang cảnh báo</a></div>{low_html}</div>'
+            '</div>'
+        )
 
     def _categories(self) -> str:
         rows = self.service.list_categories()
@@ -1103,7 +1371,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             fields = "".join(self._setting_input(key, settings.get(key, {"value": DEFAULT_SETTING_KEYS[key][0], "is_secret": DEFAULT_SETTING_KEYS[key][1]})) for key in group["keys"])
             open_attr = " open" if idx == 0 else ""
             groups.append(f'''<details class="setup-section"{open_attr}><summary><span>{esc(group["title"])}</span><span class="muted">Mở/đóng</span></summary><div class="setup-content"><p class="muted">{esc(group["desc"])}</p><div class="form-grid">{fields}</div></div></details>''')
-        return f'''<div class="hint-box"><b>Hướng dẫn cấu hình:</b><br>1) Nhập Bot Token và Telegram ID admin trước. 2) Nếu dùng ngân hàng, bật Bank và nhập Bank BIN/Số tài khoản/Chủ tài khoản/SePay API key. 3) Trong mục <b>Giao hàng cho khách</b>, chọn đơn nhỏ hiện trực tiếp hay mọi đơn đều gửi file. 4) Tick “Ghi ra file .env”. 5) Lưu xong restart bot/web để áp dụng biến môi trường.</div><div class="card"><form method="post" action="/settings">{self._form_csrf()}{"".join(groups)}<label style="display:flex;gap:10px;align-items:center;font-weight:800"><input style="width:auto;margin:0" type="checkbox" name="write_env"> Ghi ra file .env để áp dụng sau khi restart bot/web</label><br><button>{tr(self._theme_lang()[0],"save")}</button></form></div>'''
+        return f'''<div class="hint-box"><b>Hướng dẫn cấu hình theo nhóm:</b><br>1) Nhập Bot Token và Telegram ID admin trước. 2) Nếu dùng ngân hàng, bật Bank và nhập Bank BIN/Số tài khoản/Chủ tài khoản/SePay API key. 3) Trong mục <b>Giao hàng cho khách</b>, chọn đơn nhỏ hiện trực tiếp hay mọi đơn đều gửi file. 4) Tick “Ghi ra file .env”. 5) Lưu xong restart bot/web để áp dụng biến môi trường.</div><div class="card"><div class="section-head"><div><h2>Cấu hình hệ thống</h2><div class="card-subtitle">Các phần liên quan đã được gom theo nhóm: shop & admin, bot, thanh toán, giao hàng và web admin.</div></div></div><form method="post" action="/settings">{self._form_csrf()}{"".join(groups)}<label style="display:flex;gap:10px;align-items:center;font-weight:800"><input style="width:auto;margin:0" type="checkbox" name="write_env"> Ghi ra file .env để áp dụng sau khi restart bot/web</label><br><button>{tr(self._theme_lang()[0],"save")}</button></form></div>'''
 
     def _bots(self) -> str:
         rows = []
@@ -1248,5 +1516,7 @@ def create_server(db_path: str | Path, *, host: str = "127.0.0.1", port: int = 8
             raise ValueError("WEB_SESSION_SECRET is required when Web Admin is exposed outside localhost")
     if secret == "change-this-web-session-secret" or (host not in local_hosts and len(secret) < 32):
         raise ValueError("WEB_SESSION_SECRET is too weak; use a random string of at least 32 characters")
+    if os.getenv("APP_ENV", "").strip().lower() == "production" and os.getenv("WEB_COOKIE_SECURE", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise ValueError("WEB_COOKIE_SECURE=true is required when APP_ENV=production")
     server.session_secret = secret  # type: ignore[attr-defined]
     return server
